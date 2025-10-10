@@ -117,10 +117,9 @@ RUN mkdir -p /app/serve /app/inputs /app/temp /app/outputs && \
     chmod -R 777 /app/inputs /app/temp /app/outputs
 
 # 複製應用代碼 (放在最後,因為經常變動)
-COPY ./serve ./serve/
-COPY ./low-VRAM-mode ./serve/low-VRAM-mode
-COPY ./low-VRAM-mode ./low-VRAM-mode
-COPY ./qwen-omni-utils ./qwen-omni-utils
+COPY app/serve ./serve
+COPY low-VRAM-mode ./serve/low-VRAM-mode
+COPY qwen-omni-utils ./qwen-omni-utils
 
 # 安裝 qwen-omni-utils
 RUN --mount=type=cache,target=/root/.cache/pip \

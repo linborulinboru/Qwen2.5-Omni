@@ -12,10 +12,10 @@ dist/
 build/
 
 # Data directories
-inputs/
-temp/
-outputs/
-app/
+app/inputs/
+app/temp/
+app/outputs/
+app/Qwen/
 
 # Git
 .git/

@@ -19,7 +19,7 @@ def _load_model_processor(args):
     if args.cpu_only:
         device_map = 'cpu'
     else:
-        device_map = 'auto'
+        device_map = 'cuda'
 
     # Check if flash-attn2 flag is enabled and load model accordingly
     if args.flash_attn2:

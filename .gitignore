@@ -1,4 +1,7 @@
 .claude/
-app/
+app/inputs/
+app/outputs/
+app/temp/
+app/Qwen/
 
 log.txt

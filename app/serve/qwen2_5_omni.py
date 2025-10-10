@@ -20,7 +20,7 @@ import torch
 from flask import Flask, request, jsonify, send_file
 
 # Standard transformers imports
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from qwen_omni_utils import process_mm_info
 
 # ==================== Global Configuration ====================
@@ -66,17 +66,16 @@ def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
         # Load standard model
         attn_impl = "flash_attention_2" if flash_attn2 else "eager"
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
             checkpoint_path,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
-            attn_implementation=attn_impl,
-            trust_remote_code=True
+            attn_implementation=attn_impl
         )
 
         # Load processor
         print("[INFO] Loading processor...")
-        processor = AutoProcessor.from_pretrained(checkpoint_path)
+        processor = Qwen2_5OmniProcessor.from_pretrained(checkpoint_path)
 
         # Print GPU memory usage
         if torch.cuda.is_available():
@@ -179,7 +178,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         # Generate
         with torch.no_grad():
-            text_ids = model.generate(
+            generated_ids = model.generate(
                 **inputs,
                 use_audio_in_video=True,
                 max_new_tokens=max_new_tokens,
@@ -188,12 +187,19 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
                 do_sample=temperature > 0,
             )
 
-        # Decode
+        # Decode - handle the output correctly
+        # Standard model returns tensor directly, not tuple
         response = processor.batch_decode(
-            text_ids,
+            generated_ids,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False
-        )[0]
+        )
+
+        # Extract text from response (it's a list)
+        if isinstance(response, list) and len(response) > 0:
+            response = response[0]
+        else:
+            response = str(response)
 
         print(f"[{request_id}] Raw response length: {len(response)}")
 

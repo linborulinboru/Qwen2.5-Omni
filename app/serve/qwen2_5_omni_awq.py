@@ -9,7 +9,6 @@ import os
 import sys
 import tempfile
 import importlib.util
-import threading
 import uuid
 import time
 from pathlib import Path
@@ -22,7 +21,6 @@ import librosa
 from flask import Flask, request, jsonify, send_file
 from huggingface_hub import hf_hub_download
 from opencc import OpenCC
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # AWQ quantization imports
 from awq.models.base import BaseAWQForCausalLM
@@ -38,20 +36,9 @@ app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024  # 4GB
 model = None
 processor = None
 opencc_converter = None  # OpenCC converter for Traditional Chinese
-model_lock = threading.Lock()
-processing_lock = threading.Lock()
-job_status = {}
-job_lock = threading.Lock()
-
-# Parallel processing
-model_inference_semaphore = None  # Will be initialized based on GPU memory
-max_parallel_workers = 3  # Default parallel workers
 
 # Idle tracking
 last_activity_time = None
-is_processing = False
-idle_check_interval = 30  # Check every 30 seconds
-idle_timeout = 300  # 5 minutes
 model_config = {}  # Store model configuration for auto-reload
 
 # Directories - use absolute paths to ensure correct location
@@ -180,45 +167,7 @@ class Qwen2_5_OmniAWQForConditionalGeneration(BaseAWQForCausalLM):
 
         return layers
 
-# ==================== Parallel Processing Initialization ====================
 
-def init_parallel_processing(max_workers=None):
-    """
-    Initialize parallel processing with semaphore
-
-    Args:
-        max_workers: Maximum parallel workers (None = auto-detect based on GPU memory)
-
-    Returns:
-        Actual max_workers value used
-    """
-    global model_inference_semaphore, max_parallel_workers
-
-    if max_workers is None:
-        # Auto-detect based on GPU memory
-        if torch.cuda.is_available():
-            total_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            if total_mem_gb >= 24:
-                max_workers = 4
-            elif total_mem_gb >= 16:
-                max_workers = 3
-            elif total_mem_gb >= 12:
-                max_workers = 2
-            else:
-                max_workers = 1
-        else:
-            max_workers = 1
-
-    max_parallel_workers = max_workers
-    model_inference_semaphore = threading.Semaphore(max_workers)
-
-    print(f"[INFO] Parallel processing initialized with max_workers={max_workers}")
-
-    if torch.cuda.is_available():
-        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        print(f"[INFO] GPU Memory: {total_mem_gb:.1f} GB total")
-
-    return max_workers
 
 # ==================== Model Loading ====================
 
@@ -348,33 +297,7 @@ def update_activity():
     global last_activity_time
     last_activity_time = time.time()
 
-def idle_monitor():
-    """Monitor idle time and unload model if idle for too long"""
-    global model, is_processing, last_activity_time, idle_timeout
 
-    while True:
-        time.sleep(idle_check_interval)
-
-        # Skip if currently processing
-        if is_processing:
-            continue
-
-        # Skip if no activity recorded yet
-        if last_activity_time is None:
-            continue
-
-        # Check idle time
-        idle_time = time.time() - last_activity_time
-
-        if idle_time >= idle_timeout:
-            # Acquire lock and unload model
-            with model_lock:
-                # Double check conditions after acquiring lock
-                if model is not None and not is_processing:
-                    print(f"[INFO] Model idle for {idle_time:.0f} seconds, unloading...")
-                    # Call unload_model (which doesn't acquire lock itself)
-                    unload_model()
-                    last_activity_time = None
 
 # ==================== Audio Processing ====================
 
@@ -456,9 +379,9 @@ def convert_to_wav(input_path, request_id):
         raise RuntimeError(f"FFmpeg conversion error: {str(e)}")
 
 def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperature=0.1,
-                          repetition_penalty=1.1, enable_s2t=True, use_semaphore=True):
+                          repetition_penalty=1.1, enable_s2t=True):
     """
-    Transcribe a single audio file using AWQ model (thread-safe)
+    Transcribe a single audio file using AWQ model
 
     Args:
         audio_path: Path to audio file
@@ -467,24 +390,14 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         temperature: Sampling temperature
         repetition_penalty: Repetition penalty
         enable_s2t: Enable simplified to traditional Chinese conversion (default: True)
-        use_semaphore: Whether to use semaphore for concurrency control (default: True)
 
     Returns:
         Transcribed text
     """
-    global model_inference_semaphore
-
-    if use_semaphore and model_inference_semaphore is not None:
-        with model_inference_semaphore:
-            return _transcribe_audio_file_impl(
-                audio_path, request_id, max_new_tokens,
-                temperature, repetition_penalty, enable_s2t
-            )
-    else:
-        return _transcribe_audio_file_impl(
-            audio_path, request_id, max_new_tokens,
-            temperature, repetition_penalty, enable_s2t
-        )
+    return _transcribe_audio_file_impl(
+        audio_path, request_id, max_new_tokens,
+        temperature, repetition_penalty, enable_s2t
+    )
 
 def _transcribe_audio_file_impl(audio_path, request_id, max_new_tokens, temperature, repetition_penalty, enable_s2t):
     """Internal implementation of transcribe_audio_file"""
@@ -585,7 +498,7 @@ def _transcribe_audio_file_impl(audio_path, request_id, max_new_tokens, temperat
         raise
 
 def process_audio_segments(audio_path, request_id, segment_duration=600, overlap_duration=10,
-                          enable_parallel=True, parallel_workers=None, **kwargs):
+                          **kwargs):
     """
     Process long audio by splitting into overlapping segments
 
@@ -594,8 +507,6 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
         request_id: Unique request identifier
         segment_duration: Duration of each segment in seconds
         overlap_duration: Overlap duration at segment boundaries in seconds (default: 10s)
-        enable_parallel: Enable parallel processing (default: True)
-        parallel_workers: Number of parallel workers (None = use global default)
         **kwargs: Additional arguments for transcription
 
     Returns:
@@ -654,17 +565,6 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
     overlap_mins = overlap_duration / 60
     print(f"[{request_id}] Split into {len(segments)} overlapping segments ({segment_duration_mins:.1f} mins each, {overlap_mins:.1f} mins overlap)")
 
-    # Determine parallel processing
-    if parallel_workers is None:
-        parallel_workers = max_parallel_workers
-
-    use_parallel = enable_parallel and len(segments) > 1
-
-    if use_parallel:
-        print(f"[{request_id}] Using parallel processing with {parallel_workers} workers")
-    else:
-        print(f"[{request_id}] Using serial processing")
-
     # Process segments
     results = []
     temp_files = []
@@ -677,18 +577,11 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
             sf.write(temp_file, segment, sr)
             temp_files.append(temp_file)
 
-        if use_parallel:
-            # Parallel processing
-            results = _process_segments_parallel(
-                segments, segment_positions, temp_files,
-                request_id, parallel_workers, **kwargs
-            )
-        else:
-            # Serial processing
-            results = _process_segments_serial(
-                segments, segment_positions, temp_files,
-                request_id, **kwargs
-            )
+        # Serial processing
+        results = _process_segments_serial(
+            segments, segment_positions, temp_files,
+            request_id, **kwargs
+        )
 
         # Intelligent merging: remove overlapping content
         merged_result = merge_overlapping_transcriptions(results, segment_positions, request_id)
@@ -718,50 +611,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
             except:
                 pass
 
-def _process_segments_parallel(segments, segment_positions, temp_files, request_id, parallel_workers, **kwargs):
-    """Process audio segments in parallel using ThreadPoolExecutor"""
-    results = [None] * len(segments)
 
-    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-        futures = {}
-
-        # Submit all tasks
-        for idx, temp_file in enumerate(temp_files):
-            segment_start_time = segment_positions[idx]['start']
-            segment_start_mins = segment_start_time / 60
-
-            future = executor.submit(
-                transcribe_audio_file,
-                temp_file,
-                f"{request_id}_seg{idx}",
-                use_semaphore=True,  # Use semaphore for GPU concurrency control
-                **kwargs
-            )
-            futures[future] = (idx, temp_file, segment_start_mins)
-
-        # Collect results as they complete
-        completed = 0
-        for future in as_completed(futures):
-            idx, temp_file, segment_start_mins = futures[future]
-            completed += 1
-
-            try:
-                result = future.result()
-                results[idx] = result
-                print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed "
-                      f"({completed}/{len(segments)} done, {len(result)} chars, "
-                      f"starts at {segment_start_mins:.1f} mins)")
-            except Exception as e:
-                print(f"[{request_id}] Segment {idx+1} failed: {e}")
-                results[idx] = f"[Error in segment {idx}]"
-
-            # Clean up temp file
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-
-    return results
 
 def _process_segments_serial(segments, segment_positions, temp_files, request_id, **kwargs):
     """Process audio segments serially (original implementation)"""
@@ -987,7 +837,7 @@ def _transcribe_impl(return_format='file'):
     Args:
         return_format: 'file', 'json', or 'srt'
     """
-    global model, processor, is_processing, model_config
+    global model, processor, model_config
 
     # Auto-reload model if needed
     if model is None and model_config:
@@ -1027,76 +877,70 @@ def _transcribe_impl(return_format='file'):
     print(f"[{request_id}] Received audio file: {filename} ({len(audio_data)} bytes)")
 
     try:
-        # Process with lock to serialize requests
-        with processing_lock:
-            # Mark as processing to prevent idle unload
-            is_processing = True
-            update_activity()
+        print(f"[{request_id}] Starting transcription...")
 
-            print(f"[{request_id}] Starting transcription...")
+        # Get parameters
+        segment_duration = int(request.form.get('segment_duration', 600))
+        max_new_tokens = int(request.form.get('max_new_tokens', 8192))
+        temperature = float(request.form.get('temperature', 0.1))
+        repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
+        enable_s2t = request.form.get('enable_s2t', 'true').lower() == 'true'
 
-            # Get parameters
-            segment_duration = int(request.form.get('segment_duration', 600))
-            max_new_tokens = int(request.form.get('max_new_tokens', 8192))
-            temperature = float(request.form.get('temperature', 0.1))
-            repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
-            enable_s2t = request.form.get('enable_s2t', 'true').lower() == 'true'
+        # Transcribe
+        transcription = process_audio_segments(
+            input_path,
+            request_id,
+            segment_duration=segment_duration,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            enable_s2t=enable_s2t
+        )
 
-            # Transcribe
-            transcription = process_audio_segments(
-                input_path,
-                request_id,
-                segment_duration=segment_duration,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
-                enable_s2t=enable_s2t
+        # Save output
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        output_filename = f"{timestamp}.txt"
+        output_path = os.path.join(OUTPUTS_DIR, output_filename)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(transcription)
+
+        print(f"[{request_id}] Transcription saved to: {output_path}")
+        print(f"[{request_id}] ====== SAVED TRANSCRIPTION ======")
+        print(transcription)
+        print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
+
+        # Return based on format
+        if return_format == 'json':
+            return jsonify({
+                "status": "success",
+                "transcription": transcription,
+                "output_file": output_filename,
+                "timestamp": datetime.now().isoformat()
+            })
+
+        elif return_format == 'srt':
+            # Generate SRT format
+            srt_content = generate_srt_from_text(transcription, segment_duration)
+
+            srt_buffer = io.BytesIO()
+            srt_buffer.write(srt_content.encode('utf-8'))
+            srt_buffer.seek(0)
+
+            return send_file(
+                srt_buffer,
+                as_attachment=True,
+                download_name='audio.srt',
+                mimetype='text/plain'
             )
 
-            # Save output
-            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            output_filename = f"{timestamp}.txt"
-            output_path = os.path.join(OUTPUTS_DIR, output_filename)
-
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(transcription)
-
-            print(f"[{request_id}] Transcription saved to: {output_path}")
-            print(f"[{request_id}] ====== SAVED TRANSCRIPTION ======")
-            print(transcription)
-            print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
-
-            # Return based on format
-            if return_format == 'json':
-                return jsonify({
-                    "status": "success",
-                    "transcription": transcription,
-                    "output_file": output_filename,
-                    "timestamp": datetime.now().isoformat()
-                })
-
-            elif return_format == 'srt':
-                # Generate SRT format
-                srt_content = generate_srt_from_text(transcription, segment_duration)
-
-                srt_buffer = io.BytesIO()
-                srt_buffer.write(srt_content.encode('utf-8'))
-                srt_buffer.seek(0)
-
-                return send_file(
-                    srt_buffer,
-                    as_attachment=True,
-                    download_name='audio.srt',
-                    mimetype='text/plain'
-                )
-
-            else:  # return_format == 'file'
-                return send_file(
-                    output_path,
-                    as_attachment=True,
-                    download_name='audio.txt',
-                    mimetype='application/octet-stream'
-                )
+        else:  # return_format == 'file'
+            return send_file(
+                output_path,
+                as_attachment=True,
+                download_name='audio.txt',
+                mimetype='application/octet-stream'
+            )
 
     except Exception as e:
         print(f"[{request_id}] ERROR: {str(e)}")
@@ -1105,10 +949,6 @@ def _transcribe_impl(return_format='file'):
         return jsonify({"error": str(e)}), 500
 
     finally:
-        # Mark processing complete
-        is_processing = False
-        update_activity()
-
         # Clean up input file
         try:
             if os.path.exists(input_path):
@@ -1145,119 +985,9 @@ def generate_srt_from_text(text, segment_duration):
 
     return '\n'.join(srt_lines)
 
-@app.route('/transcribe/async', methods=['POST'])
-def transcribe_async():
-    """Start async transcription job"""
-    global model, model_config
 
-    # Auto-reload model if needed
-    if model is None and model_config:
-        print("[INFO] Model not loaded, reloading...")
-        load_model_processor(**model_config)
-    elif model is None:
-        return jsonify({"error": "Model not loaded and no configuration available"}), 503
 
-    # Validate request
-    if 'file' not in request.files and not request.data:
-        return jsonify({"error": "No audio file provided"}), 400
 
-    # Get audio data
-    if 'file' in request.files:
-        file = request.files['file']
-        filename = sanitize_filename(file.filename)
-        audio_data = file.read()
-    else:
-        audio_data = request.data
-        filename = "audio.wav"
-
-    # Generate job ID
-    job_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-    # Save file
-    input_path = os.path.join(INPUTS_DIR, f"{job_id}_{filename}")
-    with open(input_path, 'wb') as f:
-        f.write(audio_data)
-
-    # Get parameters
-    params = {
-        'segment_duration': int(request.form.get('segment_duration', 600)),
-        'max_new_tokens': int(request.form.get('max_new_tokens', 8192)),
-        'temperature': float(request.form.get('temperature', 0.1)),
-        'repetition_penalty': float(request.form.get('repetition_penalty', 1.1)),
-        'enable_s2t': request.form.get('enable_s2t', 'true').lower() == 'true'
-    }
-
-    # Initialize job status
-    with job_lock:
-        job_status[job_id] = {
-            "status": "processing",
-            "created_at": datetime.now().isoformat(),
-            "progress": 0
-        }
-
-    # Start background thread
-    def process_job():
-        global is_processing
-
-        try:
-            # Mark as processing
-            is_processing = True
-            update_activity()
-
-            transcription = process_audio_segments(input_path, job_id, **params)
-
-            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            output_filename = f"{timestamp}.txt"
-            output_path = os.path.join(OUTPUTS_DIR, output_filename)
-
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(transcription)
-
-            with job_lock:
-                job_status[job_id] = {
-                    "status": "completed",
-                    "transcription": transcription,
-                    "output_file": output_filename,
-                    "completed_at": datetime.now().isoformat()
-                }
-
-        except Exception as e:
-            with job_lock:
-                job_status[job_id] = {
-                    "status": "failed",
-                    "error": str(e),
-                    "failed_at": datetime.now().isoformat()
-                }
-
-        finally:
-            # Mark processing complete
-            is_processing = False
-            update_activity()
-
-            # Clean up input file
-            try:
-                if os.path.exists(input_path):
-                    os.remove(input_path)
-            except:
-                pass
-
-    thread = threading.Thread(target=process_job, daemon=True)
-    thread.start()
-
-    return jsonify({
-        "status": "accepted",
-        "job_id": job_id,
-        "message": f"Use /status/{job_id} to check progress"
-    }), 202
-
-@app.route('/status/<job_id>', methods=['GET'])
-def check_status(job_id):
-    """Check async job status"""
-    with job_lock:
-        if job_id not in job_status:
-            return jsonify({"error": "Job not found"}), 404
-
-        return jsonify(job_status[job_id])
 
 @app.route('/transcribe/file', methods=['POST'])
 def transcribe_file():
@@ -1392,11 +1122,9 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.1,
                         help="Repetition penalty")
 
-    # Parallel processing arguments
-    parser.add_argument("--max-workers", type=int, default=3,
-                        help="Maximum parallel workers for segment processing (default: 3)")
+    # Processing arguments
     parser.add_argument("--disable-parallel", action="store_true",
-                        help="Disable parallel processing")
+                        help="Disable parallel processing (this is now always disabled)")
 
     # Server arguments
     parser.add_argument("--host", type=str, default="0.0.0.0",
@@ -1428,16 +1156,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-    # Initialize parallel processing
-    if not args.disable_parallel:
-        init_parallel_processing(max_workers=args.max_workers)
-    else:
-        print("[INFO] Parallel processing disabled")
 
-    # Start idle monitor thread
-    monitor_thread = threading.Thread(target=idle_monitor, daemon=True)
-    monitor_thread.start()
-    print(f"[INFO] Idle monitor started (timeout: {idle_timeout}s)")
 
     # Start server
     print(f"\n[INFO] Starting server on {args.host}:{args.port}")
@@ -1445,17 +1164,14 @@ def main():
     print(f"  POST /transcribe         - Transcribe audio (returns text file)")
     print(f"  POST /transcribe/json    - Transcribe audio (returns JSON)")
     print(f"  POST /transcribe/srt     - Transcribe audio (returns SRT)")
-    print(f"  POST /transcribe/async   - Start async transcription")
     print(f"  POST /transcribe/file    - Transcribe file from /app/inputs directory")
-    print(f"  GET  /status/<job_id>    - Check async job status")
     print(f"  GET  /health             - Health check")
     print("=" * 60)
 
     app.run(
         host=args.host,
         port=args.port,
-        debug=False,
-        threaded=True
+        debug=False
     )
 
 if __name__ == "__main__":

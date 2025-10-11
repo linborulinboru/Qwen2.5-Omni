@@ -4,4 +4,9 @@ app/outputs/
 app/temp/
 app/Qwen/
 
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 log.txt

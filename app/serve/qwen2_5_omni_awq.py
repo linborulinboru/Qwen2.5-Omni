@@ -254,24 +254,49 @@ def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
         last_activity_time = time.time()
 
 def unload_model():
-    """Unload model and clear CUDA cache"""
+    """Unload model and clear CUDA cache - INTERNAL USE ONLY (assumes lock is held)"""
     global model, processor
 
-    with model_lock:
-        if model is None:
-            return
+    if model is None:
+        return
 
-        print("[INFO] Unloading model due to idle timeout...")
+    print("[INFO] Unloading model due to idle timeout...")
+
+    try:
+        # Move model components to CPU before deletion to free GPU memory
+        if torch.cuda.is_available():
+            print("[INFO] Moving model components to CPU...")
+            try:
+                # Move main model components to CPU
+                if hasattr(model, 'model') and hasattr(model.model, 'thinker'):
+                    model.model.thinker = model.model.thinker.cpu()
+                elif hasattr(model, 'cpu'):
+                    model.cpu()
+            except Exception as e:
+                print(f"[WARNING] Error moving model to CPU: {e}")
+
+        # Delete model and processor
         del model
         del processor
         model = None
         processor = None
 
+        # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
+            # Print memory stats
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[INFO] GPU Memory after unload: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+
         print("[INFO] Model unloaded and CUDA cache cleared")
+
+    except Exception as e:
+        print(f"[ERROR] Error during model unload: {e}")
+        import traceback
+        traceback.print_exc()
 
 def update_activity():
     """Update last activity timestamp"""
@@ -297,9 +322,12 @@ def idle_monitor():
         idle_time = time.time() - last_activity_time
 
         if idle_time >= idle_timeout:
+            # Acquire lock and unload model
             with model_lock:
+                # Double check conditions after acquiring lock
                 if model is not None and not is_processing:
                     print(f"[INFO] Model idle for {idle_time:.0f} seconds, unloading...")
+                    # Call unload_model (which doesn't acquire lock itself)
                     unload_model()
                     last_activity_time = None
 

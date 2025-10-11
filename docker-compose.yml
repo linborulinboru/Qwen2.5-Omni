@@ -123,7 +123,7 @@ services:
     image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-http-gguf
     ports:
-      - "5023:5000"
+      - "5029:5000"
     volumes:
       - ./app/serve:/app/serve
       - ./app/inputs:/app/inputs
@@ -165,7 +165,7 @@ services:
     image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-web
     ports:
-      - "8912:80"
+      - "8920:80"
     volumes:
       - ./app/serve:/app/serve
       - ./app/Qwen:/app/Qwen

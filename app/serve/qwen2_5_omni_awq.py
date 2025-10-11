@@ -440,9 +440,9 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # Build prompt for transcription - using same format as official demo
+    # Messages with transcription prompt
     system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
-    user_prompt = "請將音訊內容精確轉錄為文字。要求：1) 加入適當的標點符號（句號、逗號、問號等）2) 根據語意進行合理分段 3) 只輸出轉錄文字，不要包含任何解釋、評論或元資料。"
+    user_prompt = "請將音訊內容精確轉錄為繁體中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 分句與換行：每個完整句子獨立成行,話題轉換時另起一段(空行),引用經文或列舉項目時每項獨立成行 3) 段落結構：根據語意邏輯分段,段落間用空行分隔,相同主題保持在同一段 4) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 5) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
 
     messages = [
         {"role": "system", "content": [
@@ -460,13 +460,10 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         # Apply chat template
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        # Use process_mm_info like official demo - this is the key!
+        # Use process_mm_info like official demo
         audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
 
-        print(f"[{request_id}] Audio processed by process_mm_info")
-        print(f"[{request_id}] Processing with model...")
-
-        # Process inputs exactly like official demo
+        # Process inputs
         inputs = processor(
             text=text,
             audio=audios,
@@ -478,12 +475,12 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         print(f"[{request_id}] Generating transcription...")
 
-        # Generate - AWQ model returns tuple when return_audio=True
+        # Generate
         with torch.no_grad():
             output = model.generate(
                 **inputs,
                 use_audio_in_video=True,
-                return_audio=True,  # This makes it return (text_ids, audio_codes, audio)
+                return_audio=True,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
@@ -499,76 +496,6 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         # Extract response from list
         response = text_output[0] if isinstance(text_output, list) else text_output
-
-        print(f"[{request_id}] Raw response length: {len(response)}")
-
-        # Post-process: Remove all metadata and markers
-        # Remove system/user/assistant markers
-        if '<|im_start|>assistant\n' in response:
-            response = response.split('<|im_start|>assistant\n')[-1]
-
-        # Remove system prompt content ONLY if it appears at the beginning
-        system_prompt_markers = [
-            "You are Qwen, a virtual human developed by the Qwen Team",
-            "You are Qwen, a virtual human developed by",
-            "You are Qwen",
-        ]
-        for marker in system_prompt_markers:
-            if response.startswith(marker) or response.startswith(f"\n{marker}") or response.startswith(f" {marker}"):
-                # Find where the actual content starts (after the system prompt)
-                idx = response.find(marker)
-                if idx != -1:
-                    # Find the end of this sentence/paragraph
-                    next_para = response.find('\n\n', idx)
-                    next_line = response.find('\n', idx)
-
-                    # Try to find where actual transcription starts
-                    if next_para != -1:
-                        # Content after double newline
-                        response = response[next_para+2:].strip()
-                    elif next_line != -1:
-                        # Content after single newline
-                        response = response[next_line+1:].strip()
-                    else:
-                        # No newline, try to find end of sentence
-                        end_markers = ['. ', '。', '! ', '? ']
-                        for end_marker in end_markers:
-                            end_idx = response.find(end_marker, idx)
-                            if end_idx != -1:
-                                response = response[end_idx+len(end_marker):].strip()
-                                break
-                    break
-
-        # Remove common prefixes
-        prefixes_to_remove = [
-            "system\n",
-            "user\n",
-            "assistant\n",
-        ]
-        for prefix in prefixes_to_remove:
-            if response.startswith(prefix):
-                response = response[len(prefix):]
-
-        # Remove ending phrases
-        endings_to_remove = [
-            "如果你還有其他關於音頻轉寫或者內容理解的問題",
-            "如果你還有其他關於音訊轉寫或者內容理解的問題",
-            "如果你還有其他關於這方面的問題",
-            "如果需要進一步的幫助",
-            "\nsystem\n",
-            "\nuser\n",
-            "\nassistant\n",
-        ]
-        for ending in endings_to_remove:
-            if ending in response:
-                response = response.split(ending)[0]
-
-        response = response.strip()
-
-        # Final check: If response is empty or too short, it might be just metadata
-        if len(response) < 10:
-            print(f"[{request_id}] WARNING: Response too short ({len(response)} chars), might be metadata only")
-            response = "[No transcription content detected]"
 
         # Simplified to Traditional Chinese conversion
         if enable_s2t and opencc_converter is not None:

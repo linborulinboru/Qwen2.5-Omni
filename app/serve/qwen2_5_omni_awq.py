@@ -449,6 +449,9 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             torch.cuda.empty_cache()
 
         print(f"[{request_id}] Transcription complete: {len(response)} chars")
+        print(f"[{request_id}] ====== TRANSCRIPTION RESULT ======")
+        print(response)
+        print(f"[{request_id}] ====== END OF TRANSCRIPTION ======")
 
         return response
 
@@ -477,7 +480,8 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
     audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
     duration = len(audio_array) / sr
 
-    print(f"[{request_id}] Audio duration: {duration:.2f}s, sr: {sr}")
+    duration_mins = duration / 60
+    print(f"[{request_id}] Audio duration: {duration:.2f}s ({duration_mins:.2f} mins), sr: {sr}")
 
     # If short enough, process directly
     if duration <= segment_duration:
@@ -492,7 +496,8 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
         segment = audio_array[i:i + segment_samples]
         segments.append(segment)
 
-    print(f"[{request_id}] Split into {len(segments)} segments")
+    segment_duration_mins = segment_duration / 60
+    print(f"[{request_id}] Split into {len(segments)} segments ({segment_duration_mins:.1f} mins each)")
 
     # Process each segment
     results = []
@@ -506,11 +511,14 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             sf.write(temp_file, segment, sr)
             temp_files.append(temp_file)
 
-            print(f"[{request_id}] Processing segment {idx+1}/{len(segments)}...")
+            segment_start_time = idx * segment_duration
+            segment_start_mins = segment_start_time / 60
+            print(f"[{request_id}] Processing segment {idx+1}/{len(segments)} (starts at {segment_start_mins:.1f} mins)...")
 
             try:
                 result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", **kwargs)
                 results.append(result)
+                print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed: {len(result)} chars")
             except Exception as e:
                 print(f"[{request_id}] Segment {idx} failed: {e}")
                 results.append(f"[Error in segment {idx}]")
@@ -544,7 +552,15 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             if line_stripped:  # Only add non-empty lines
                 cleaned_lines.append(line_stripped)
 
-        return '\n'.join(cleaned_lines)
+        final_result = '\n'.join(cleaned_lines)
+
+        # Log final combined result
+        print(f"[{request_id}] ====== FINAL COMBINED TRANSCRIPTION ======")
+        print(final_result)
+        print(f"[{request_id}] ====== END OF COMBINED TRANSCRIPTION ======")
+        print(f"[{request_id}] Total length: {len(final_result)} chars")
+
+        return final_result
 
     finally:
         # Clean up any remaining temp files
@@ -674,6 +690,9 @@ def _transcribe_impl(return_format='file'):
                 f.write(transcription)
 
             print(f"[{request_id}] Transcription saved to: {output_path}")
+            print(f"[{request_id}] ====== SAVED TRANSCRIPTION ======")
+            print(transcription)
+            print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
 
             # Return based on format
             if return_format == 'json':

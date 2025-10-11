@@ -313,6 +313,56 @@ def sanitize_filename(filename):
     filename = re.sub(r'[^\w\s\-\.]', '', filename)
     return filename[:255]  # Limit length
 
+def convert_to_wav(input_path, request_id):
+    """
+    Convert any audio/video file to WAV format using FFmpeg
+
+    Args:
+        input_path: Path to input file (any audio/video format)
+        request_id: Unique request identifier for logging
+
+    Returns:
+        Path to converted WAV file
+    """
+    import subprocess
+
+    # Generate output path
+    output_path = os.path.join(TEMP_DIR, f"{request_id}_converted.wav")
+
+    print(f"[{request_id}] Converting to WAV format using FFmpeg...")
+
+    try:
+        # FFmpeg command: convert to 16kHz mono WAV
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-ar', '16000',      # Sample rate 16kHz
+            '-ac', '1',          # Mono
+            '-f', 'wav',         # WAV format
+            '-y',                # Overwrite output file
+            output_path
+        ]
+
+        # Run FFmpeg
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300  # 5 minutes timeout
+        )
+
+        if result.returncode != 0:
+            error_msg = result.stderr.decode('utf-8', errors='ignore')
+            raise RuntimeError(f"FFmpeg conversion failed: {error_msg}")
+
+        print(f"[{request_id}] Conversion successful: {output_path}")
+        return output_path
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("FFmpeg conversion timeout (>5 minutes)")
+    except Exception as e:
+        raise RuntimeError(f"FFmpeg conversion error: {str(e)}")
+
 def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperature=0.1,
                           repetition_penalty=1.1, enable_s2t=True):
     """
@@ -476,10 +526,19 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
     """
     print(f"[{request_id}] Processing audio file: {audio_path}")
 
-    # Load full audio
-    audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
-    duration = len(audio_array) / sr
+    # Convert to WAV if needed
+    converted_path = None
 
+    # Try to load directly first
+    try:
+        audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
+    except Exception as e:
+        # If direct loading fails, convert with FFmpeg
+        print(f"[{request_id}] Direct loading failed, converting with FFmpeg...")
+        converted_path = convert_to_wav(audio_path, request_id)
+        audio_array, sr = librosa.load(converted_path, sr=16000, mono=True)
+
+    duration = len(audio_array) / sr
     duration_mins = duration / 60
     print(f"[{request_id}] Audio duration: {duration:.2f}s ({duration_mins:.2f} mins), sr: {sr}")
 
@@ -568,6 +627,14 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             try:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
+            except:
+                pass
+
+        # Clean up converted WAV file
+        if converted_path and os.path.exists(converted_path):
+            try:
+                os.remove(converted_path)
+                print(f"[{request_id}] Cleaned up converted file: {converted_path}")
             except:
                 pass
 

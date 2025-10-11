@@ -479,6 +479,38 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         if '<|im_start|>assistant\n' in response:
             response = response.split('<|im_start|>assistant\n')[-1]
 
+        # Remove system prompt content ONLY if it appears at the beginning
+        system_prompt_markers = [
+            "You are Qwen, a virtual human developed by the Qwen Team",
+            "You are Qwen, a virtual human developed by",
+            "You are Qwen",
+        ]
+        for marker in system_prompt_markers:
+            if response.startswith(marker) or response.startswith(f"\n{marker}") or response.startswith(f" {marker}"):
+                # Find where the actual content starts (after the system prompt)
+                idx = response.find(marker)
+                if idx != -1:
+                    # Find the end of this sentence/paragraph
+                    next_para = response.find('\n\n', idx)
+                    next_line = response.find('\n', idx)
+
+                    # Try to find where actual transcription starts
+                    if next_para != -1:
+                        # Content after double newline
+                        response = response[next_para+2:].strip()
+                    elif next_line != -1:
+                        # Content after single newline
+                        response = response[next_line+1:].strip()
+                    else:
+                        # No newline, try to find end of sentence
+                        end_markers = ['. ', '。', '! ', '? ']
+                        for end_marker in end_markers:
+                            end_idx = response.find(end_marker, idx)
+                            if end_idx != -1:
+                                response = response[end_idx+len(end_marker):].strip()
+                                break
+                    break
+
         # Remove common prefixes
         prefixes_to_remove = [
             "system\n",
@@ -504,6 +536,11 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
                 response = response.split(ending)[0]
 
         response = response.strip()
+
+        # Final check: If response is empty or too short, it might be just metadata
+        if len(response) < 10:
+            print(f"[{request_id}] WARNING: Response too short ({len(response)} chars), might be metadata only")
+            response = "[No transcription content detected]"
 
         # Simplified to Traditional Chinese conversion
         if enable_s2t and opencc_converter is not None:

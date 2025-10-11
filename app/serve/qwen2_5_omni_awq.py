@@ -21,6 +21,7 @@ import torch
 import librosa
 from flask import Flask, request, jsonify, send_file
 from huggingface_hub import hf_hub_download
+from opencc import OpenCC
 
 # AWQ quantization imports
 from awq.models.base import BaseAWQForCausalLM
@@ -35,10 +36,18 @@ app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024  # 4GB
 # Global variables
 model = None
 processor = None
+opencc_converter = None  # OpenCC converter for Traditional Chinese
 model_lock = threading.Lock()
 processing_lock = threading.Lock()
 job_status = {}
 job_lock = threading.Lock()
+
+# Idle tracking
+last_activity_time = None
+is_processing = False
+idle_check_interval = 30  # Check every 30 seconds
+idle_timeout = 300  # 5 minutes
+model_config = {}  # Store model configuration for auto-reload
 
 # Directories - use absolute paths to ensure correct location
 WORK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,16 +179,33 @@ class Qwen2_5_OmniAWQForConditionalGeneration(BaseAWQForCausalLM):
 
 def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
     """Load AWQ quantized model and processor"""
-    global model, processor
+    global model, processor, opencc_converter, last_activity_time, model_config
 
     with model_lock:
         if model is not None:
             print("[INFO] Model already loaded")
+            last_activity_time = time.time()
             return
 
         print(f"[INFO] Loading AWQ model from: {checkpoint_path}")
         print(f"[INFO] Flash Attention 2: {flash_attn2}")
         print(f"[INFO] Local model: {local_model}")
+
+        # Store model configuration for auto-reload
+        model_config = {
+            'checkpoint_path': checkpoint_path,
+            'flash_attn2': flash_attn2,
+            'local_model': local_model
+        }
+
+        # Initialize OpenCC converter for Simplified to Traditional Chinese
+        if opencc_converter is None:
+            try:
+                opencc_converter = OpenCC('s2t')
+                print("[INFO] OpenCC Simplified to Traditional Chinese converter initialized")
+            except Exception as e:
+                print(f"[WARNING] Failed to initialize OpenCC: {e}")
+                opencc_converter = None
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -224,6 +250,9 @@ def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
 
         print("[INFO] Model loaded successfully!")
 
+        # Update last activity time
+        last_activity_time = time.time()
+
 def unload_model():
     """Unload model and clear CUDA cache"""
     global model, processor
@@ -232,7 +261,7 @@ def unload_model():
         if model is None:
             return
 
-        print("[INFO] Unloading model...")
+        print("[INFO] Unloading model due to idle timeout...")
         del model
         del processor
         model = None
@@ -243,6 +272,36 @@ def unload_model():
             torch.cuda.synchronize()
 
         print("[INFO] Model unloaded and CUDA cache cleared")
+
+def update_activity():
+    """Update last activity timestamp"""
+    global last_activity_time
+    last_activity_time = time.time()
+
+def idle_monitor():
+    """Monitor idle time and unload model if idle for too long"""
+    global model, is_processing, last_activity_time, idle_timeout
+
+    while True:
+        time.sleep(idle_check_interval)
+
+        # Skip if currently processing
+        if is_processing:
+            continue
+
+        # Skip if no activity recorded yet
+        if last_activity_time is None:
+            continue
+
+        # Check idle time
+        idle_time = time.time() - last_activity_time
+
+        if idle_time >= idle_timeout:
+            with model_lock:
+                if model is not None and not is_processing:
+                    print(f"[INFO] Model idle for {idle_time:.0f} seconds, unloading...")
+                    unload_model()
+                    last_activity_time = None
 
 # ==================== Audio Processing ====================
 
@@ -255,7 +314,7 @@ def sanitize_filename(filename):
     return filename[:255]  # Limit length
 
 def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperature=0.1,
-                          repetition_penalty=1.1, enable_s2t=False):
+                          repetition_penalty=1.1, enable_s2t=True):
     """
     Transcribe a single audio file using AWQ model
 
@@ -265,21 +324,28 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         max_new_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         repetition_penalty: Repetition penalty
-        enable_s2t: Enable simplified to traditional Chinese conversion
+        enable_s2t: Enable simplified to traditional Chinese conversion (default: True)
 
     Returns:
         Transcribed text
     """
-    global model, processor
+    global model, processor, opencc_converter, model_config
 
-    if model is None:
-        raise RuntimeError("Model not loaded")
+    # Auto-reload model if it was unloaded
+    if model is None and model_config:
+        print(f"[{request_id}] Model not loaded, reloading...")
+        load_model_processor(**model_config)
+    elif model is None:
+        raise RuntimeError("Model not loaded and no configuration available")
+
+    # Update activity timestamp
+    update_activity()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Build prompt for transcription - using same format as official demo
     system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
-    user_prompt = "請將音頻內容轉錄為文本。只輸出轉錄結果，不要添加任何解釋或評論。"
+    user_prompt = "請將音訊內容精確轉錄為文字。要求：1) 加入適當的標點符號（句號、逗號、問號等）2) 根據語意進行合理分段 3) 只輸出轉錄文字，不要包含任何解釋、評論或元資料。"
 
     messages = [
         {"role": "system", "content": [
@@ -315,35 +381,54 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         print(f"[{request_id}] Generating transcription...")
 
-        # Generate
+        # Generate - AWQ model returns tuple when return_audio=True
         with torch.no_grad():
-            text_ids = model.generate(
+            output = model.generate(
                 **inputs,
                 use_audio_in_video=True,
+                return_audio=True,  # This makes it return (text_ids, audio_codes, audio)
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
                 do_sample=temperature > 0,
             )
 
-        # Decode
-        response = processor.batch_decode(
-            text_ids,
+        # Decode - extract text_ids from output[0]
+        text_output = processor.batch_decode(
+            output[0],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False
-        )[0]
+        )
+
+        # Extract response from list
+        response = text_output[0] if isinstance(text_output, list) else text_output
 
         print(f"[{request_id}] Raw response length: {len(response)}")
 
-        # Post-process: Remove generation markers
+        # Post-process: Remove all metadata and markers
+        # Remove system/user/assistant markers
         if '<|im_start|>assistant\n' in response:
             response = response.split('<|im_start|>assistant\n')[-1]
+
+        # Remove common prefixes
+        prefixes_to_remove = [
+            "system\n",
+            "user\n",
+            "assistant\n",
+        ]
+        for prefix in prefixes_to_remove:
+            if response.startswith(prefix):
+                response = response[len(prefix):]
 
         # Remove ending phrases
         endings_to_remove = [
             "如果你還有其他關於音頻轉寫或者內容理解的問題",
+            "如果你還有其他關於音訊轉寫或者內容理解的問題",
             "如果你還有其他關於這方面的問題",
             "如果需要進一步的幫助",
+            "\nsystem\n",
+            "\nuser\n",
+            "\nassistant\n",
         ]
         for ending in endings_to_remove:
             if ending in response:
@@ -351,12 +436,11 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         response = response.strip()
 
-        # Simplified to Traditional Chinese conversion (optional)
-        if enable_s2t:
+        # Simplified to Traditional Chinese conversion
+        if enable_s2t and opencc_converter is not None:
             try:
-                from opencc import OpenCC
-                cc = OpenCC('s2t')
-                response = cc.convert(response)
+                response = opencc_converter.convert(response)
+                print(f"[{request_id}] Applied OpenCC Simplified to Traditional Chinese conversion")
             except Exception as e:
                 print(f"[{request_id}] Warning: OpenCC conversion failed: {e}")
 
@@ -374,7 +458,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         traceback.print_exc()
         raise
 
-def process_audio_segments(audio_path, request_id, segment_duration=60, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=600, **kwargs):
     """
     Process long audio by splitting into segments
 
@@ -437,9 +521,30 @@ def process_audio_segments(audio_path, request_id, segment_duration=60, **kwargs
             except:
                 pass
 
-        # Combine results
+        # Combine results with natural paragraph separation
         combined = "\n\n".join(results)
-        return combined
+
+        # Clean up any remaining metadata from combined result
+        lines = combined.split('\n')
+        cleaned_lines = []
+        skip_markers = {'system', 'user', 'assistant'}
+
+        for line in lines:
+            line_stripped = line.strip()
+            # Skip lines that are just metadata markers
+            if line_stripped in skip_markers:
+                continue
+            # Skip lines that start with metadata markers followed by content
+            if any(line_stripped.startswith(f"{marker}\n") for marker in skip_markers):
+                # Extract content after marker
+                for marker in skip_markers:
+                    if line_stripped.startswith(f"{marker}\n"):
+                        line_stripped = line_stripped[len(marker)+1:]
+                        break
+            if line_stripped:  # Only add non-empty lines
+                cleaned_lines.append(line_stripped)
+
+        return '\n'.join(cleaned_lines)
 
     finally:
         # Clean up any remaining temp files
@@ -494,13 +599,14 @@ def _transcribe_impl(return_format='file'):
     Args:
         return_format: 'file', 'json', or 'srt'
     """
-    global model, processor
+    global model, processor, is_processing, model_config
 
-    # Ensure model is loaded
-    if model is None:
-        with model_lock:
-            if model is None:
-                return jsonify({"error": "Model not loaded yet, please wait"}), 503
+    # Auto-reload model if needed
+    if model is None and model_config:
+        print("[INFO] Model not loaded, reloading...")
+        load_model_processor(**model_config)
+    elif model is None:
+        return jsonify({"error": "Model not loaded and no configuration available"}), 503
 
     # Validate request
     if 'file' not in request.files and not request.data:
@@ -535,14 +641,18 @@ def _transcribe_impl(return_format='file'):
     try:
         # Process with lock to serialize requests
         with processing_lock:
+            # Mark as processing to prevent idle unload
+            is_processing = True
+            update_activity()
+
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters
-            segment_duration = int(request.form.get('segment_duration', 60))
+            segment_duration = int(request.form.get('segment_duration', 600))
             max_new_tokens = int(request.form.get('max_new_tokens', 8192))
             temperature = float(request.form.get('temperature', 0.1))
             repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
-            enable_s2t = request.form.get('enable_s2t', 'false').lower() == 'true'
+            enable_s2t = request.form.get('enable_s2t', 'true').lower() == 'true'
 
             # Transcribe
             transcription = process_audio_segments(
@@ -604,6 +714,10 @@ def _transcribe_impl(return_format='file'):
         return jsonify({"error": str(e)}), 500
 
     finally:
+        # Mark processing complete
+        is_processing = False
+        update_activity()
+
         # Clean up input file
         try:
             if os.path.exists(input_path):
@@ -643,10 +757,14 @@ def generate_srt_from_text(text, segment_duration):
 @app.route('/transcribe/async', methods=['POST'])
 def transcribe_async():
     """Start async transcription job"""
-    global model
+    global model, model_config
 
-    if model is None:
-        return jsonify({"error": "Model not loaded yet"}), 503
+    # Auto-reload model if needed
+    if model is None and model_config:
+        print("[INFO] Model not loaded, reloading...")
+        load_model_processor(**model_config)
+    elif model is None:
+        return jsonify({"error": "Model not loaded and no configuration available"}), 503
 
     # Validate request
     if 'file' not in request.files and not request.data:
@@ -671,11 +789,11 @@ def transcribe_async():
 
     # Get parameters
     params = {
-        'segment_duration': int(request.form.get('segment_duration', 60)),
+        'segment_duration': int(request.form.get('segment_duration', 600)),
         'max_new_tokens': int(request.form.get('max_new_tokens', 8192)),
         'temperature': float(request.form.get('temperature', 0.1)),
         'repetition_penalty': float(request.form.get('repetition_penalty', 1.1)),
-        'enable_s2t': request.form.get('enable_s2t', 'false').lower() == 'true'
+        'enable_s2t': request.form.get('enable_s2t', 'true').lower() == 'true'
     }
 
     # Initialize job status
@@ -688,7 +806,13 @@ def transcribe_async():
 
     # Start background thread
     def process_job():
+        global is_processing
+
         try:
+            # Mark as processing
+            is_processing = True
+            update_activity()
+
             transcription = process_audio_segments(input_path, job_id, **params)
 
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -715,6 +839,10 @@ def transcribe_async():
                 }
 
         finally:
+            # Mark processing complete
+            is_processing = False
+            update_activity()
+
             # Clean up input file
             try:
                 if os.path.exists(input_path):
@@ -754,8 +882,8 @@ def main():
                         help="Enable Flash Attention 2")
 
     # Processing arguments
-    parser.add_argument("--segment-duration", type=int, default=60,
-                        help="Audio segment duration in seconds (default: 60)")
+    parser.add_argument("--segment-duration", type=int, default=600,
+                        help="Audio segment duration in seconds (default: 600 = 10 minutes)")
     parser.add_argument("--max-new-tokens", type=int, default=8192,
                         help="Maximum new tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.1,
@@ -792,6 +920,11 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+    # Start idle monitor thread
+    monitor_thread = threading.Thread(target=idle_monitor, daemon=True)
+    monitor_thread.start()
+    print(f"[INFO] Idle monitor started (timeout: {idle_timeout}s)")
 
     # Start server
     print(f"\n[INFO] Starting server on {args.host}:{args.port}")

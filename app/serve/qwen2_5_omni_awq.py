@@ -22,6 +22,7 @@ import librosa
 from flask import Flask, request, jsonify, send_file
 from huggingface_hub import hf_hub_download
 from opencc import OpenCC
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # AWQ quantization imports
 from awq.models.base import BaseAWQForCausalLM
@@ -41,6 +42,10 @@ model_lock = threading.Lock()
 processing_lock = threading.Lock()
 job_status = {}
 job_lock = threading.Lock()
+
+# Parallel processing
+model_inference_semaphore = None  # Will be initialized based on GPU memory
+max_parallel_workers = 3  # Default parallel workers
 
 # Idle tracking
 last_activity_time = None
@@ -175,6 +180,46 @@ class Qwen2_5_OmniAWQForConditionalGeneration(BaseAWQForCausalLM):
 
         return layers
 
+# ==================== Parallel Processing Initialization ====================
+
+def init_parallel_processing(max_workers=None):
+    """
+    Initialize parallel processing with semaphore
+
+    Args:
+        max_workers: Maximum parallel workers (None = auto-detect based on GPU memory)
+
+    Returns:
+        Actual max_workers value used
+    """
+    global model_inference_semaphore, max_parallel_workers
+
+    if max_workers is None:
+        # Auto-detect based on GPU memory
+        if torch.cuda.is_available():
+            total_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            if total_mem_gb >= 24:
+                max_workers = 4
+            elif total_mem_gb >= 16:
+                max_workers = 3
+            elif total_mem_gb >= 12:
+                max_workers = 2
+            else:
+                max_workers = 1
+        else:
+            max_workers = 1
+
+    max_parallel_workers = max_workers
+    model_inference_semaphore = threading.Semaphore(max_workers)
+
+    print(f"[INFO] Parallel processing initialized with max_workers={max_workers}")
+
+    if torch.cuda.is_available():
+        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"[INFO] GPU Memory: {total_mem_gb:.1f} GB total")
+
+    return max_workers
+
 # ==================== Model Loading ====================
 
 def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
@@ -198,11 +243,11 @@ def load_model_processor(checkpoint_path, flash_attn2=False, local_model=False):
             'local_model': local_model
         }
 
-        # Initialize OpenCC converter for Simplified to Traditional Chinese
+        # Initialize OpenCC converter for Simplified to Traditional Chinese (Taiwan standard)
         if opencc_converter is None:
             try:
-                opencc_converter = OpenCC('s2t')
-                print("[INFO] OpenCC Simplified to Traditional Chinese converter initialized")
+                opencc_converter = OpenCC('s2tw')
+                print("[INFO] OpenCC Simplified to Traditional Chinese (Taiwan) converter initialized")
             except Exception as e:
                 print(f"[WARNING] Failed to initialize OpenCC: {e}")
                 opencc_converter = None
@@ -411,9 +456,9 @@ def convert_to_wav(input_path, request_id):
         raise RuntimeError(f"FFmpeg conversion error: {str(e)}")
 
 def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperature=0.1,
-                          repetition_penalty=1.1, enable_s2t=True):
+                          repetition_penalty=1.1, enable_s2t=True, use_semaphore=True):
     """
-    Transcribe a single audio file using AWQ model
+    Transcribe a single audio file using AWQ model (thread-safe)
 
     Args:
         audio_path: Path to audio file
@@ -422,10 +467,27 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         temperature: Sampling temperature
         repetition_penalty: Repetition penalty
         enable_s2t: Enable simplified to traditional Chinese conversion (default: True)
+        use_semaphore: Whether to use semaphore for concurrency control (default: True)
 
     Returns:
         Transcribed text
     """
+    global model_inference_semaphore
+
+    if use_semaphore and model_inference_semaphore is not None:
+        with model_inference_semaphore:
+            return _transcribe_audio_file_impl(
+                audio_path, request_id, max_new_tokens,
+                temperature, repetition_penalty, enable_s2t
+            )
+    else:
+        return _transcribe_audio_file_impl(
+            audio_path, request_id, max_new_tokens,
+            temperature, repetition_penalty, enable_s2t
+        )
+
+def _transcribe_audio_file_impl(audio_path, request_id, max_new_tokens, temperature, repetition_penalty, enable_s2t):
+    """Internal implementation of transcribe_audio_file"""
     global model, processor, opencc_converter, model_config
 
     # Auto-reload model if it was unloaded
@@ -522,7 +584,8 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         traceback.print_exc()
         raise
 
-def process_audio_segments(audio_path, request_id, segment_duration=600, overlap_duration=10, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=600, overlap_duration=10,
+                          enable_parallel=True, parallel_workers=None, **kwargs):
     """
     Process long audio by splitting into overlapping segments
 
@@ -531,6 +594,8 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
         request_id: Unique request identifier
         segment_duration: Duration of each segment in seconds
         overlap_duration: Overlap duration at segment boundaries in seconds (default: 10s)
+        enable_parallel: Enable parallel processing (default: True)
+        parallel_workers: Number of parallel workers (None = use global default)
         **kwargs: Additional arguments for transcription
 
     Returns:
@@ -589,35 +654,41 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
     overlap_mins = overlap_duration / 60
     print(f"[{request_id}] Split into {len(segments)} overlapping segments ({segment_duration_mins:.1f} mins each, {overlap_mins:.1f} mins overlap)")
 
-    # Process each segment
+    # Determine parallel processing
+    if parallel_workers is None:
+        parallel_workers = max_parallel_workers
+
+    use_parallel = enable_parallel and len(segments) > 1
+
+    if use_parallel:
+        print(f"[{request_id}] Using parallel processing with {parallel_workers} workers")
+    else:
+        print(f"[{request_id}] Using serial processing")
+
+    # Process segments
     results = []
     temp_files = []
 
     try:
+        # Save all segments to temp files first
+        import soundfile as sf
         for idx, segment in enumerate(segments):
-            # Save segment to temp file
             temp_file = os.path.join(TEMP_DIR, f"{request_id}_segment_{idx}.wav")
-            import soundfile as sf
             sf.write(temp_file, segment, sr)
             temp_files.append(temp_file)
 
-            segment_start_time = segment_positions[idx]['start']
-            segment_start_mins = segment_start_time / 60
-            print(f"[{request_id}] Processing segment {idx+1}/{len(segments)} (starts at {segment_start_mins:.1f} mins)...")
-
-            try:
-                result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", **kwargs)
-                results.append(result)
-                print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed: {len(result)} chars")
-            except Exception as e:
-                print(f"[{request_id}] Segment {idx} failed: {e}")
-                results.append(f"[Error in segment {idx}]")
-
-            # Clean up segment file
-            try:
-                os.remove(temp_file)
-            except:
-                pass
+        if use_parallel:
+            # Parallel processing
+            results = _process_segments_parallel(
+                segments, segment_positions, temp_files,
+                request_id, parallel_workers, **kwargs
+            )
+        else:
+            # Serial processing
+            results = _process_segments_serial(
+                segments, segment_positions, temp_files,
+                request_id, **kwargs
+            )
 
         # Intelligent merging: remove overlapping content
         merged_result = merge_overlapping_transcriptions(results, segment_positions, request_id)
@@ -646,6 +717,76 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, overlap
                 print(f"[{request_id}] Cleaned up converted file: {converted_path}")
             except:
                 pass
+
+def _process_segments_parallel(segments, segment_positions, temp_files, request_id, parallel_workers, **kwargs):
+    """Process audio segments in parallel using ThreadPoolExecutor"""
+    results = [None] * len(segments)
+
+    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+        futures = {}
+
+        # Submit all tasks
+        for idx, temp_file in enumerate(temp_files):
+            segment_start_time = segment_positions[idx]['start']
+            segment_start_mins = segment_start_time / 60
+
+            future = executor.submit(
+                transcribe_audio_file,
+                temp_file,
+                f"{request_id}_seg{idx}",
+                use_semaphore=True,  # Use semaphore for GPU concurrency control
+                **kwargs
+            )
+            futures[future] = (idx, temp_file, segment_start_mins)
+
+        # Collect results as they complete
+        completed = 0
+        for future in as_completed(futures):
+            idx, temp_file, segment_start_mins = futures[future]
+            completed += 1
+
+            try:
+                result = future.result()
+                results[idx] = result
+                print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed "
+                      f"({completed}/{len(segments)} done, {len(result)} chars, "
+                      f"starts at {segment_start_mins:.1f} mins)")
+            except Exception as e:
+                print(f"[{request_id}] Segment {idx+1} failed: {e}")
+                results[idx] = f"[Error in segment {idx}]"
+
+            # Clean up temp file
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+
+    return results
+
+def _process_segments_serial(segments, segment_positions, temp_files, request_id, **kwargs):
+    """Process audio segments serially (original implementation)"""
+    results = []
+
+    for idx, temp_file in enumerate(temp_files):
+        segment_start_time = segment_positions[idx]['start']
+        segment_start_mins = segment_start_time / 60
+        print(f"[{request_id}] Processing segment {idx+1}/{len(segments)} (starts at {segment_start_mins:.1f} mins)...")
+
+        try:
+            result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", use_semaphore=False, **kwargs)
+            results.append(result)
+            print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed: {len(result)} chars")
+        except Exception as e:
+            print(f"[{request_id}] Segment {idx} failed: {e}")
+            results.append(f"[Error in segment {idx}]")
+
+        # Clean up temp file
+        try:
+            os.remove(temp_file)
+        except:
+            pass
+
+    return results
 
 def merge_overlapping_transcriptions(results, segment_positions, request_id):
     """
@@ -1251,6 +1392,12 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.1,
                         help="Repetition penalty")
 
+    # Parallel processing arguments
+    parser.add_argument("--max-workers", type=int, default=3,
+                        help="Maximum parallel workers for segment processing (default: 3)")
+    parser.add_argument("--disable-parallel", action="store_true",
+                        help="Disable parallel processing")
+
     # Server arguments
     parser.add_argument("--host", type=str, default="0.0.0.0",
                         help="Host to bind to")
@@ -1280,6 +1427,12 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+    # Initialize parallel processing
+    if not args.disable_parallel:
+        init_parallel_processing(max_workers=args.max_workers)
+    else:
+        print("[INFO] Parallel processing disabled")
 
     # Start idle monitor thread
     monitor_thread = threading.Thread(target=idle_monitor, daemon=True)

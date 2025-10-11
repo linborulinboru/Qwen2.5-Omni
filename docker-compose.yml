@@ -30,7 +30,8 @@ services:
       "--flash-attn2",
       "--local-model",
       "--repetition-penalty", "1.1",
-      "--idle-timeout", "300"
+      "--idle-timeout", "300",
+      "--max-workers", "3"
     ]
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -70,7 +71,8 @@ services:
       "--max-new-tokens", "8192",
       "--temperature", "0.1",
       "--repetition-penalty", "1.1",
-      "--idle-timeout", "600"
+      "--idle-timeout", "600",
+      "--max-workers", "1"
     ]
     environment:
       - CUDA_VISIBLE_DEVICES=0

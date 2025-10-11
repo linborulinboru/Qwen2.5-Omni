@@ -1,7 +1,7 @@
 services:
   # HTTP Transcription Service (General Model) - This service uses the shared image.
   qwen2.5-omni-http:
-    image: qwen-omni-app:latest
+    image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-http
     ports:
       - "5020:5000"
@@ -45,7 +45,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: qwen-omni-app:latest
+    image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-http-awq
     ports:
       - "5021:5000"
@@ -83,7 +83,7 @@ services:
 
   # HTTP Transcription Service (GGUF Quantized) - This service uses the shared image.
   qwen2.5-omni-http-gguf:
-    image: qwen-omni-app:latest
+    image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-http-gguf
     ports:
       - "5022:5000"
@@ -125,7 +125,7 @@ services:
 
   # Web Demo Service (Optional) - This service also uses the shared image.
   qwen2.5-omni-web:
-    image: qwen-omni-app:latest
+    image: qwen2.5-omni-app:latest
     container_name: qwen2.5-omni-web
     ports:
       - "8912:80"

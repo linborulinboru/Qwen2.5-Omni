@@ -143,10 +143,3 @@ ENV PYTHONUNBUFFERED=1
 
 # 暴露端口
 EXPOSE 80 5000 5001
-
-# 健康檢查
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
-    CMD curl -f http://localhost:5000/health || exit 1
-
-# 默認命令
-CMD ["python3", "serve/qwen2_5-omni.py", "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B", "--host", "0.0.0.0", "--port", "5000"]

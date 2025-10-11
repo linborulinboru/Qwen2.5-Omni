@@ -378,14 +378,15 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         traceback.print_exc()
         raise
 
-def process_audio_segments(audio_path, request_id, segment_duration=600, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=600, overlap_duration=10, **kwargs):
     """
-    Process long audio by splitting into segments
+    Process long audio by splitting into overlapping segments
 
     Args:
         audio_path: Path to audio file
         request_id: Unique request identifier
         segment_duration: Duration of each segment in seconds
+        overlap_duration: Overlap duration at segment boundaries in seconds (default: 10s)
         **kwargs: Additional arguments for transcription
 
     Returns:
@@ -417,16 +418,35 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
         print(f"[{request_id}] Audio short enough, processing directly")
         return transcribe_audio_file(audio_path, request_id, **kwargs)
 
-    # Split into segments
+    # Split into overlapping segments
     segment_samples = int(segment_duration * sr)
-    segments = []
+    overlap_samples = int(overlap_duration * sr)
+    step_samples = segment_samples - overlap_samples
 
-    for i in range(0, len(audio_array), segment_samples):
-        segment = audio_array[i:i + segment_samples]
-        segments.append(segment)
+    segments = []
+    segment_positions = []  # Track start/end positions for overlap removal
+
+    for i in range(0, len(audio_array), step_samples):
+        start_idx = i
+        end_idx = min(i + segment_samples, len(audio_array))
+        segment = audio_array[start_idx:end_idx]
+
+        # Only add if segment is long enough (at least 5 seconds)
+        if len(segment) >= sr * 5:
+            segments.append(segment)
+            segment_positions.append({
+                'start': start_idx / sr,  # Start time in seconds
+                'end': end_idx / sr,      # End time in seconds
+                'has_overlap_start': i > 0,  # Has overlap with previous segment
+                'has_overlap_end': end_idx < len(audio_array)  # Has overlap with next segment
+            })
+
+        if end_idx >= len(audio_array):
+            break
 
     segment_duration_mins = segment_duration / 60
-    print(f"[{request_id}] Split into {len(segments)} segments ({segment_duration_mins:.1f} mins each)")
+    overlap_mins = overlap_duration / 60
+    print(f"[{request_id}] Split into {len(segments)} overlapping segments ({segment_duration_mins:.1f} mins each, {overlap_mins:.1f} mins overlap)")
 
     # Process each segment
     results = []
@@ -439,7 +459,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             sf.write(temp_file, segment, sr)
             temp_files.append(temp_file)
 
-            segment_start_time = idx * segment_duration
+            segment_start_time = segment_positions[idx]['start']
             segment_start_mins = segment_start_time / 60
             print(f"[{request_id}] Processing segment {idx+1}/{len(segments)} (starts at {segment_start_mins:.1f} mins)...")
 
@@ -457,38 +477,16 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             except:
                 pass
 
-        # Combine results with natural paragraph separation
-        combined = "\n\n".join(results)
-
-        # Clean up any remaining metadata from combined result
-        lines = combined.split('\n')
-        cleaned_lines = []
-        skip_markers = {'system', 'user', 'assistant'}
-
-        for line in lines:
-            line_stripped = line.strip()
-            # Skip lines that are just metadata markers
-            if line_stripped in skip_markers:
-                continue
-            # Skip lines that start with metadata markers followed by content
-            if any(line_stripped.startswith(f"{marker}\n") for marker in skip_markers):
-                # Extract content after marker
-                for marker in skip_markers:
-                    if line_stripped.startswith(f"{marker}\n"):
-                        line_stripped = line_stripped[len(marker)+1:]
-                        break
-            if line_stripped:  # Only add non-empty lines
-                cleaned_lines.append(line_stripped)
-
-        final_result = '\n'.join(cleaned_lines)
+        # Intelligent merging: remove overlapping content
+        merged_result = merge_overlapping_transcriptions(results, segment_positions, request_id)
 
         # Log final combined result
         print(f"[{request_id}] ====== FINAL COMBINED TRANSCRIPTION ======")
-        print(final_result)
+        print(merged_result)
         print(f"[{request_id}] ====== END OF COMBINED TRANSCRIPTION ======")
-        print(f"[{request_id}] Total length: {len(final_result)} chars")
+        print(f"[{request_id}] Total length: {len(merged_result)} chars")
 
-        return final_result
+        return merged_result
 
     finally:
         # Clean up any remaining temp files
@@ -506,6 +504,161 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 print(f"[{request_id}] Cleaned up converted file: {converted_path}")
             except:
                 pass
+
+def merge_overlapping_transcriptions(results, segment_positions, request_id):
+    """
+    Intelligently merge overlapping transcription segments
+
+    Args:
+        results: List of transcription results
+        segment_positions: List of segment position info
+        request_id: Request identifier for logging
+
+    Returns:
+        Merged transcription text
+    """
+    if len(results) == 0:
+        return ""
+
+    if len(results) == 1:
+        return results[0]
+
+    print(f"[{request_id}] Merging {len(results)} overlapping segments...")
+
+    merged_parts = []
+
+    for idx, result in enumerate(results):
+        if idx == 0:
+            # First segment: keep everything
+            merged_parts.append(result)
+            print(f"[{request_id}] Segment 0: kept full content ({len(result)} chars)")
+        else:
+            # Subsequent segments: try to find overlap with previous segment
+            prev_result = results[idx - 1]
+            overlap_removed = remove_overlap_content(prev_result, result, request_id, idx)
+
+            if overlap_removed:
+                merged_parts.append(overlap_removed)
+                print(f"[{request_id}] Segment {idx}: removed overlap, kept {len(overlap_removed)} chars (removed ~{len(result) - len(overlap_removed)} chars)")
+            else:
+                # If overlap detection fails, keep full content with separator
+                merged_parts.append(result)
+                print(f"[{request_id}] Segment {idx}: overlap detection failed, kept full content ({len(result)} chars)")
+
+    # Join with double newline to maintain paragraph structure
+    final_result = "\n\n".join(merged_parts)
+
+    # Clean up excessive newlines
+    while "\n\n\n" in final_result:
+        final_result = final_result.replace("\n\n\n", "\n\n")
+
+    return final_result.strip()
+
+def remove_overlap_content(prev_text, current_text, request_id, segment_idx):
+    """
+    Remove overlapping content from current segment by comparing with previous segment
+
+    Strategy:
+    1. Split both texts into sentences
+    2. Find the last few sentences of prev_text in the beginning of current_text
+    3. Remove the overlapping sentences from current_text
+
+    Args:
+        prev_text: Previous segment transcription
+        current_text: Current segment transcription
+        request_id: Request identifier for logging
+        segment_idx: Current segment index
+
+    Returns:
+        Current text with overlap removed, or None if no overlap found
+    """
+    # Split into sentences (consider Chinese punctuation)
+    import re
+
+    # Split by sentence-ending punctuation
+    def split_sentences(text):
+        # Split by 。 ! ? but keep the punctuation
+        sentences = re.split('([。!?]+)', text)
+        # Recombine sentences with their punctuation
+        result = []
+        for i in range(0, len(sentences)-1, 2):
+            if i+1 < len(sentences):
+                result.append(sentences[i] + sentences[i+1])
+        # Add last part if exists
+        if len(sentences) % 2 == 1 and sentences[-1].strip():
+            result.append(sentences[-1])
+        return [s.strip() for s in result if s.strip()]
+
+    prev_sentences = split_sentences(prev_text)
+    current_sentences = split_sentences(current_text)
+
+    if not prev_sentences or not current_sentences:
+        return None
+
+    # Try to find overlap: check last N sentences of prev against first M sentences of current
+    max_check = min(10, len(prev_sentences), len(current_sentences))  # Check up to 10 sentences
+
+    best_overlap_count = 0
+
+    # Check for sentence-level matches
+    for n in range(1, max_check + 1):
+        # Get last n sentences from previous
+        prev_tail = prev_sentences[-n:]
+
+        # Check if they appear at the start of current
+        if len(current_sentences) >= n:
+            current_head = current_sentences[:n]
+
+            # Check similarity (allowing for minor differences due to transcription variations)
+            matches = 0
+            for prev_sent, curr_sent in zip(prev_tail, current_head):
+                # Calculate similarity (simple character overlap)
+                similarity = calculate_similarity(prev_sent, curr_sent)
+                if similarity > 0.7:  # 70% similarity threshold
+                    matches += 1
+
+            if matches >= n * 0.7:  # At least 70% of sentences match
+                best_overlap_count = n
+
+    if best_overlap_count > 0:
+        # Remove overlapping sentences from current text
+        remaining_sentences = current_sentences[best_overlap_count:]
+        result = "".join(remaining_sentences)
+        print(f"[{request_id}] Segment {segment_idx}: detected {best_overlap_count} overlapping sentences")
+        return result
+
+    # If no sentence-level overlap, try character-level overlap for last sentence
+    # This handles cases where a sentence was cut mid-way
+    prev_tail = prev_text[-200:].strip()  # Last 200 chars
+
+    for length in range(min(100, len(prev_tail)), 10, -5):  # Try different lengths
+        tail_fragment = prev_tail[-length:]
+        if tail_fragment in current_text[:300]:  # Check in first 300 chars
+            pos = current_text.find(tail_fragment)
+            if pos != -1 and pos < 100:  # Found near the beginning
+                result = current_text[pos + len(tail_fragment):].strip()
+                print(f"[{request_id}] Segment {segment_idx}: detected character-level overlap ({length} chars)")
+                return result
+
+    return None
+
+def calculate_similarity(text1, text2):
+    """Calculate similarity between two texts using character overlap"""
+    if not text1 or not text2:
+        return 0.0
+
+    # Remove whitespace for comparison
+    t1 = text1.replace(" ", "").replace("\n", "")
+    t2 = text2.replace(" ", "").replace("\n", "")
+
+    if not t1 or not t2:
+        return 0.0
+
+    # Count matching characters
+    matches = sum(c1 == c2 for c1, c2 in zip(t1, t2))
+    max_len = max(len(t1), len(t2))
+
+    return matches / max_len if max_len > 0 else 0.0
 
 # ==================== Flask Routes ====================
 

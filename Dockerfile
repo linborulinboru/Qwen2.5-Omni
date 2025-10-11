@@ -108,6 +108,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     opencc-python-reimplemented \
     python-magic
 
+# 第九層: llama-cpp-python (GGUF 支援)
+# 先安裝構建依賴
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir scikit-build-core[pyproject] pathspec pybind11
+
+# 使用 CUDA 加速版本
+ENV CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=all"
+ENV FORCE_CMAKE=1
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    pip3 install --no-cache-dir llama-cpp-python --no-build-isolation
+
 # ==================== 應用程式安裝 ====================
 
 FROM dev AS bundle_app

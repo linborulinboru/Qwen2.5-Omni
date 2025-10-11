@@ -191,18 +191,36 @@ def convert_to_wav(input_path, request_id):
     output_path = os.path.join(TEMP_DIR, f"{request_id}_converted.wav")
 
     print(f"[{request_id}] Converting to WAV format using FFmpeg...")
+    print(f"[{request_id}] Input: {input_path}")
+    print(f"[{request_id}] Output: {output_path}")
 
     try:
+        # Check file magic bytes to detect actual format
+        with open(input_path, 'rb') as f:
+            header = f.read(12)
+
+        # Detect MP4/MOV by checking for ftyp box
+        is_mp4 = (len(header) >= 12 and
+                  header[4:8] == b'ftyp')
+
+        print(f"[{request_id}] File magic bytes suggest MP4: {is_mp4}")
+
         # FFmpeg command: convert to 16kHz mono WAV
-        cmd = [
-            'ffmpeg',
+        cmd = ['ffmpeg']
+
+        # If it looks like MP4 but has wrong extension, specify format
+        if is_mp4:
+            cmd.extend(['-f', 'mov,mp4,m4a,3gp,3g2,mj2'])  # MP4 demuxer
+
+        cmd.extend([
             '-i', input_path,
+            '-vn',               # No video
             '-ar', '16000',      # Sample rate 16kHz
             '-ac', '1',          # Mono
-            '-f', 'wav',         # WAV format
+            '-f', 'wav',         # WAV format output
             '-y',                # Overwrite output file
             output_path
-        ]
+        ])
 
         # Run FFmpeg
         result = subprocess.run(
@@ -214,7 +232,8 @@ def convert_to_wav(input_path, request_id):
 
         if result.returncode != 0:
             error_msg = result.stderr.decode('utf-8', errors='ignore')
-            raise RuntimeError(f"FFmpeg conversion failed: {error_msg}")
+            print(f"[{request_id}] FFmpeg stderr: {error_msg}")
+            raise RuntimeError(f"FFmpeg conversion failed (returncode {result.returncode})")
 
         print(f"[{request_id}] Conversion successful: {output_path}")
         return output_path

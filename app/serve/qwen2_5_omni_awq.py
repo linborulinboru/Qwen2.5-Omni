@@ -330,18 +330,36 @@ def convert_to_wav(input_path, request_id):
     output_path = os.path.join(TEMP_DIR, f"{request_id}_converted.wav")
 
     print(f"[{request_id}] Converting to WAV format using FFmpeg...")
+    print(f"[{request_id}] Input: {input_path}")
+    print(f"[{request_id}] Output: {output_path}")
 
     try:
+        # Check file magic bytes to detect actual format
+        with open(input_path, 'rb') as f:
+            header = f.read(12)
+
+        # Detect MP4/MOV by checking for ftyp box
+        is_mp4 = (len(header) >= 12 and
+                  header[4:8] == b'ftyp')
+
+        print(f"[{request_id}] File magic bytes suggest MP4: {is_mp4}")
+
         # FFmpeg command: convert to 16kHz mono WAV
-        cmd = [
-            'ffmpeg',
+        cmd = ['ffmpeg']
+
+        # If it looks like MP4 but has wrong extension, specify format
+        if is_mp4:
+            cmd.extend(['-f', 'mov,mp4,m4a,3gp,3g2,mj2'])  # MP4 demuxer
+
+        cmd.extend([
             '-i', input_path,
+            '-vn',               # No video
             '-ar', '16000',      # Sample rate 16kHz
             '-ac', '1',          # Mono
-            '-f', 'wav',         # WAV format
+            '-f', 'wav',         # WAV format output
             '-y',                # Overwrite output file
             output_path
-        ]
+        ])
 
         # Run FFmpeg
         result = subprocess.run(
@@ -353,7 +371,8 @@ def convert_to_wav(input_path, request_id):
 
         if result.returncode != 0:
             error_msg = result.stderr.decode('utf-8', errors='ignore')
-            raise RuntimeError(f"FFmpeg conversion failed: {error_msg}")
+            print(f"[{request_id}] FFmpeg stderr: {error_msg}")
+            raise RuntimeError(f"FFmpeg conversion failed (returncode {result.returncode})")
 
         print(f"[{request_id}] Conversion successful: {output_path}")
         return output_path
@@ -954,6 +973,116 @@ def check_status(job_id):
 
         return jsonify(job_status[job_id])
 
+@app.route('/transcribe/file', methods=['POST'])
+def transcribe_file():
+    """
+    Transcribe a file that already exists in /app/inputs directory
+
+    Usage:
+        POST /transcribe/file
+        Content-Type: application/json
+        {
+            "filename": "20250912 聖經學校 16 罪與悔改 翻譯語音.mp4",
+            "segment_duration": 600,
+            "max_new_tokens": 8192,
+            "temperature": 0.1,
+            "repetition_penalty": 1.1,
+            "enable_s2t": true
+        }
+    """
+    global model, model_config, is_processing
+
+    # Auto-reload model if needed
+    if model is None and model_config:
+        print("[INFO] Model not loaded, reloading...")
+        load_model_processor(**model_config)
+    elif model is None:
+        return jsonify({"error": "Model not loaded and no configuration available"}), 503
+
+    # Get JSON data
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
+
+    # Get filename
+    filename = data.get('filename')
+    if not filename:
+        return jsonify({"error": "No filename provided"}), 400
+
+    # Sanitize filename for security
+    filename = sanitize_filename(filename)
+
+    # Check if file exists
+    input_path = os.path.join(INPUTS_DIR, filename)
+    if not os.path.exists(input_path):
+        return jsonify({"error": f"File not found: {filename}"}), 404
+
+    # Generate request ID
+    request_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    print(f"[{request_id}] Processing file from inputs: {filename}")
+
+    try:
+        # Process with lock to serialize requests
+        with processing_lock:
+            # Mark as processing to prevent idle unload
+            is_processing = True
+            update_activity()
+
+            print(f"[{request_id}] Starting transcription...")
+
+            # Get parameters from JSON
+            segment_duration = int(data.get('segment_duration', 600))
+            max_new_tokens = int(data.get('max_new_tokens', 8192))
+            temperature = float(data.get('temperature', 0.1))
+            repetition_penalty = float(data.get('repetition_penalty', 1.1))
+            enable_s2t = data.get('enable_s2t', True)
+
+            # Transcribe
+            transcription = process_audio_segments(
+                input_path,
+                request_id,
+                segment_duration=segment_duration,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                enable_s2t=enable_s2t
+            )
+
+            # Save output
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            output_filename = f"{timestamp}.txt"
+            output_path = os.path.join(OUTPUTS_DIR, output_filename)
+
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(transcription)
+
+            print(f"[{request_id}] Transcription saved to: {output_path}")
+            print(f"[{request_id}] ====== SAVED TRANSCRIPTION ======")
+            print(transcription)
+            print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
+
+            return jsonify({
+                "status": "success",
+                "transcription": transcription,
+                "output_file": output_filename,
+                "timestamp": datetime.now().isoformat()
+            })
+
+    except Exception as e:
+        print(f"[{request_id}] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        # Mark processing complete
+        is_processing = False
+        update_activity()
+
 # ==================== Main ====================
 
 def main():
@@ -1019,6 +1148,7 @@ def main():
     print(f"  POST /transcribe/json    - Transcribe audio (returns JSON)")
     print(f"  POST /transcribe/srt     - Transcribe audio (returns SRT)")
     print(f"  POST /transcribe/async   - Start async transcription")
+    print(f"  POST /transcribe/file    - Transcribe file from /app/inputs directory")
     print(f"  GET  /status/<job_id>    - Check async job status")
     print(f"  GET  /health             - Health check")
     print("=" * 60)

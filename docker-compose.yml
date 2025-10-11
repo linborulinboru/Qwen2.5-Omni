@@ -1,50 +1,10 @@
 services:
-  # HTTP Transcription Service (AWQ Quantized) - This service builds the shared image.
-  qwen2.5-omni-http-awq:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: qwen-omni-app:latest
-    container_name: qwen2.5-omni-http-awq
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./app/serve:/app/serve
-      - ./app/inputs:/app/inputs
-      - ./app/temp:/app/temp
-      - ./app/outputs:/app/outputs
-      - ./app/Qwen:/app/Qwen
-    working_dir: /app
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, utility, compute]
-    command: [
-      "python3", "serve/qwen2_5_omni_awq.py",
-      "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B-AWQ",
-      "--host", "0.0.0.0",
-      "--port", "5000",
-      "--flash-attn2",
-      "--local-model",
-      "--repetition-penalty", "1.1",
-      "--idle-timeout", "300"
-    ]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-    networks:
-      - qwen_network
-    profiles: ["awq"]
-
   # HTTP Transcription Service (General Model) - This service uses the shared image.
   qwen2.5-omni-http:
     image: qwen-omni-app:latest
     container_name: qwen2.5-omni-http
     ports:
-      - "5001:5000"
+      - "5020:5000"
     volumes:
       - ./app/serve:/app/serve
       - ./app/inputs:/app/inputs
@@ -79,6 +39,89 @@ services:
       - qwen_network
     profiles:
       - general
+
+  # HTTP Transcription Service (AWQ Quantized) - This service builds the shared image.
+  qwen2.5-omni-http-awq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-omni-app:latest
+    container_name: qwen2.5-omni-http-awq
+    ports:
+      - "5021:5000"
+    volumes:
+      - ./app/serve:/app/serve
+      - ./app/inputs:/app/inputs
+      - ./app/temp:/app/temp
+      - ./app/outputs:/app/outputs
+      - ./app/Qwen:/app/Qwen
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+    command: [
+      "python3", "serve/qwen2_5_omni_awq.py",
+      "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B-AWQ",
+      "--host", "0.0.0.0",
+      "--port", "5000",
+      "--flash-attn2",
+      "--local-model",
+      "--repetition-penalty", "1.1",
+      "--idle-timeout", "300"
+    ]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    restart: unless-stopped
+    networks:
+      - qwen_network
+    profiles: ["awq"]
+
+
+  # HTTP Transcription Service (GGUF Quantized) - This service uses the shared image.
+  qwen2.5-omni-http-gguf:
+    image: qwen-omni-app:latest
+    container_name: qwen2.5-omni-http-gguf
+    ports:
+      - "5022:5000"
+    volumes:
+      - ./app/serve:/app/serve
+      - ./app/inputs:/app/inputs
+      - ./app/temp:/app/temp
+      - ./app/outputs:/app/outputs
+      - ./app/Qwen:/app/Qwen
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+    command: [
+      "python3", "serve/qwen2_5_omni_gguf.py",
+      "--model-path", "Qwen/Qwen2.5-Omni-7B-UD-Q8_K_XL.gguf",
+      "--host", "0.0.0.0",
+      "--port", "5000",
+      "--n-ctx", "8192",
+      "--n-gpu-layers", "-1",
+      "--use-mmap",
+      "--segment-duration", "600",
+      "--max-tokens", "8192",
+      "--temperature", "0.1",
+      "--repetition-penalty", "1.1",
+      "--idle-timeout", "300"
+    ]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    restart: unless-stopped
+    networks:
+      - qwen_network
+    profiles:
+      - gguf
 
   # Web Demo Service (Optional) - This service also uses the shared image.
   qwen2.5-omni-web:

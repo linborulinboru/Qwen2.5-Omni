@@ -92,7 +92,8 @@ def _load_model_processor(args):
         model_config = {
             'checkpoint_path': args.checkpoint_path,
             'flash_attn2': args.flash_attn2,
-            'cpu_only': args.cpu_only
+            'cpu_only': args.cpu_only,
+            'fp8': args.fp8
         }
 
         if args.cpu_only:
@@ -100,11 +101,31 @@ def _load_model_processor(args):
         else:
             device_map = 'cuda'
 
+        # Determine torch dtype based on FP8 setting
+        if args.fp8:
+            # Note: FP8 support requires specific hardware (like H100) and libraries (like transformers with FP8 support)
+            # Check if torch has FP8 support
+            try:
+                import torch
+                if hasattr(torch, 'float8_e4m3fn'):
+                    # Additional check if we can actually create an FP8 tensor
+                    torch.empty(1, dtype=torch.float8_e4m3fn)
+                    torch_dtype = torch.float8_e4m3fn
+                    print("Using FP8 precision for model inference")
+                else:
+                    torch_dtype = 'auto'
+                    print("FP8 not available in this PyTorch build, using default precision")
+            except (TypeError, AttributeError, NotImplementedError):
+                torch_dtype = 'auto'
+                print("FP8 not available or not supported by this PyTorch version, using default precision")
+        else:
+            torch_dtype = 'auto'
+
         # Check if flash-attn2 flag is enabled and load model accordingly
         if args.flash_attn2:
             model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
                 args.checkpoint_path,
-                torch_dtype='auto',
+                torch_dtype=torch_dtype,
                 attn_implementation='flash_attention_2',
                 device_map=device_map
             )
@@ -112,7 +133,7 @@ def _load_model_processor(args):
             model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
                 args.checkpoint_path, 
                 device_map=device_map, 
-                torch_dtype='auto'
+                torch_dtype=torch_dtype
             )
 
         processor = Qwen2_5OmniProcessor.from_pretrained(args.checkpoint_path)
@@ -354,8 +375,10 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         # Use process_mm_info like official demo
         audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-
-        # Process inputs
+        
+        # For audio-only mode, we can potentially optimize by focusing on audio processing
+        # For now, we'll pass all modalities as the model expects them
+        # In future, this could be optimized to disable visual processing if possible
         inputs = processor(
             text=text,
             audio=audios,
@@ -1147,6 +1170,9 @@ def _get_args():
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')
+    
+    # FP8 precision support
+    parser.add_argument('--fp8', action='store_true', help='Use FP8 precision for model inference (requires supported hardware)')
 
     args = parser.parse_args()
     return args

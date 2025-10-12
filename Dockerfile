@@ -108,20 +108,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     opencc-python-reimplemented \
     python-magic
 
-# 第九層: llama-cpp-python (GGUF 支援)
-# 先安裝構建依賴
+# 第九層: 其他應用依賴
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --no-cache-dir scikit-build-core[pyproject] pathspec pybind11
-
-# 使用 CUDA 加速版本
-ENV CUDACXX=/usr/local/cuda/bin/nvcc
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
-    CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) \
-    LLAMA_CUDA=1 \
-    FORCE_CMAKE=1 \
-    CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=all" \
-    pip3 install --no-cache-dir llama-cpp-python --no-build-isolation
+    pip3 install --no-cache-dir \
+    scikit-build-core[pyproject] pathspec pybind11
 
 # ==================== 應用程式安裝 ====================
 

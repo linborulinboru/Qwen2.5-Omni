@@ -514,12 +514,6 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", **kwargs)
                 results.append(result)
 
-                # Output segment result to log immediately
-                print(f"[{request_id}] ====== SEGMENT {idx+1}/{len(segments)} RESULT (starts at {segment_start_mins:.1f} mins) ======")
-                print(result)
-                print(f"[{request_id}] ====== END OF SEGMENT {idx+1} ({len(result)} chars) ======")
-                print()  # Empty line for readability
-
                 # Append segment result to output file immediately
                 with open(output_path, 'a', encoding='utf-8') as f:
                     if idx > 0:
@@ -665,7 +659,7 @@ def _transcribe_impl(return_format='file'):
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters
-            segment_duration = int(request.form.get('segment_duration', 300))
+            segment_duration = int(request.form.get('segment_duration', 60))
             max_new_tokens = int(request.form.get('max_new_tokens', 8192))
             temperature = float(request.form.get('temperature', 0.1))
             repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
@@ -1143,7 +1137,7 @@ def _get_args():
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to (for compatibility)')
     parser.add_argument('--port', type=int, default=7860, help='Port to bind to (for compatibility)')
     parser.add_argument('--audio-only', action='store_true', help='Audio only mode (for compatibility)')
-    parser.add_argument('--segment-duration', type=int, default=300, help='Audio segment duration in seconds (for compatibility)')
+    parser.add_argument('--segment-duration', type=int, default=60, help='Audio segment duration in seconds (for compatibility)')
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')

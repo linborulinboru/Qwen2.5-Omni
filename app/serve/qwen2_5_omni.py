@@ -177,6 +177,14 @@ def update_activity():
     global last_activity_time
     last_activity_time = time.time()
 
+
+def log_gpu_memory(request_id="system"):
+    """Log current GPU memory usage"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"[{request_id}] GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+
 def idle_monitor():
     """Monitor idle time and unload model if idle for too long"""
     global model, is_processing, last_activity_time, idle_timeout
@@ -416,14 +424,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             except Exception as e:
                 print(f"[{request_id}] Warning: OpenCC conversion failed: {e}")
 
-        # Clean up CUDA cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
         print(f"[{request_id}] Transcription complete: {len(response)} chars")
-        print(f"[{request_id}] ====== TRANSCRIPTION RESULT ======")
-        print(response)
-        print(f"[{request_id}] ====== END OF TRANSCRIPTION ======")
 
         return response
 
@@ -432,6 +433,11 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         import traceback
         traceback.print_exc()
         raise
+    finally:
+        # Clean up CUDA cache and free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 def process_audio_segments(audio_path, request_id, segment_duration=600, **kwargs):
     """
@@ -509,6 +515,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             segment_start_time = idx * segment_duration
             segment_start_mins = segment_start_time / 60
             print(f"[{request_id}] Processing segment {idx+1}/{len(segments)} (starts at {segment_start_mins:.1f} mins)...")
+            log_gpu_memory(request_id)
 
             try:
                 result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", **kwargs)
@@ -530,11 +537,17 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                         f.write("\n\n")
                     f.write(f"[Error in segment {idx}]")
 
-            # Clean up segment file
+            # Clean up segment file and free memory
             try:
                 os.remove(temp_file)
             except:
                 pass
+            
+            # Clear any temporary variables and synchronize CUDA
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                log_gpu_memory(f"{request_id}_cleanup")
 
         # Simple merging: join all segments
         merged_result = "\n\n".join(results)
@@ -563,6 +576,12 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 print(f"[{request_id}] Cleaned up converted file: {converted_path}")
             except:
                 pass
+        
+        # Final cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            log_gpu_memory(f"{request_id}_final")
 
 def load_model_processor_with_args(args):
     """Wrapper to load model with args object (for compatibility with idle monitoring)"""
@@ -1141,6 +1160,7 @@ def _get_args():
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')
+    parser.add_argument('--memory-optimization', action='store_true', help='Enable additional memory optimization (may reduce performance)')
 
     args = parser.parse_args()
     return args

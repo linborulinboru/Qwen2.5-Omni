@@ -330,7 +330,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
     system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
     
     # Use custom user prompt if provided, otherwise use default
-    user_prompt = custom_user_prompt or "請將音訊內容精確轉錄為中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
+    user_prompt = custom_user_prompt or DEFAULT_USER_PROMPT
 
     print(f"[{request_id}] Processing audio file...")
 
@@ -723,6 +723,11 @@ def _transcribe_impl(return_format='file'):
         except:
             pass
 
+# ==================== Default Prompts ====================
+
+# Default transcription prompt
+DEFAULT_USER_PROMPT = "請將音訊內容精確轉錄為中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
+
 # ==================== Original Gradio UI Functions ====================
 
 def _launch_demo(args, model, processor):
@@ -744,7 +749,8 @@ def _launch_demo(args, model, processor):
             return text
         if language == 'zh':
             return cn_text
-        return text   
+        return text
+   
     def convert_webm_to_mp4(input_file, output_file):
         try:
             (
@@ -797,9 +803,6 @@ def _launch_demo(args, model, processor):
                         }]
                     })
         return messages
-
-    # Default transcription prompt
-    user_prompt = "請將音訊內容精確轉錄為中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
 
     def predict(messages, voice=DEFAULT_VOICE):
         print('predict history: ', messages)    
@@ -1154,20 +1157,21 @@ if __name__ == "__main__":
     
     model, processor = _load_model_processor(args)
     
+    # Run Flask API in a background thread regardless of mode
+    import threading
+    def run_flask():
+        flask_host = getattr(args, 'host', args.flask_host)
+        flask_port = getattr(args, 'port', args.flask_port)
+        print(f"[INFO] Starting Flask API on {flask_host}:{flask_port}")
+        flask_app.run(host=flask_host, port=flask_port, debug=False, threaded=True, use_reloader=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("[INFO] Flask API thread started")
+    
     # In audio-only mode, only start the Flask API without Gradio UI
     if args.audio_only:
         print("[INFO] Running in audio-only mode - launching Flask API only")
-        
-        # Also run Flask API in a background thread
-        import threading
-        def run_flask():
-            flask_host = getattr(args, 'host', args.flask_host)
-            flask_port = getattr(args, 'port', args.flask_port)
-            print(f"Starting Flask API on {flask_host}:{flask_port}")
-            flask_app.run(host=flask_host, port=flask_port, debug=False, threaded=True, use_reloader=False)
-        
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
         
         # Keep the main thread alive
         try:

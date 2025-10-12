@@ -30,8 +30,7 @@ services:
       "--max-new-tokens", "8192",
       "--temperature", "0.1",
       "--repetition-penalty", "1.1",
-      "--idle-timeout", "600",
-      "--fp8"
+      "--idle-timeout", "600"
     ]
     environment:
       - CUDA_VISIBLE_DEVICES=0

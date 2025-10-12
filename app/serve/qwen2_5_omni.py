@@ -14,6 +14,7 @@ import shutil
 import uuid
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from argparse import ArgumentParser
+from opencc import OpenCC
 
 import modelscope_studio.components.base as ms
 import modelscope_studio.components.antd as antd
@@ -26,28 +27,15 @@ from qwen_omni_utils import process_mm_info
 # --- 全域變數和設定 ---
 model = None
 processor = None
+opencc_converter = None  # OpenCC converter for Traditional Chinese
 args = None
 last_activity_time = time.time()
 model_lock = threading.Lock()
+processing_lock = threading.Lock()  # 用於序列化請求處理
 IDLE_TIMEOUT = 300  # 預設閒置300秒後卸載模型，可由命令列參數覆蓋
 
-# --- 日誌設定 ---
-# 使用 print 進行格式化輸出，以避免與 logging 模組的格式衝突
-class FormattedLogger:
-    def info(self, message):
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
-        print(f"{timestamp} - INFO - {message}")
-    def error(self, message, exc_info=False):
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
-        print(f"{timestamp} - ERROR - {message}")
-        if exc_info:
-            import traceback
-            traceback.print_exc()
-    def warning(self, message):
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
-        print(f"{timestamp} - WARNING - {message}")
-
-logger = FormattedLogger()
+# 閒置追蹤
+is_processing = False  # 是否正在處理中
 
 
 # --- 提示詞設定 ---
@@ -62,8 +50,8 @@ os.makedirs('temp', exist_ok=True)
 # --- 模型管理功能 ---
 def _load_model_processor_internal():
     """內部函數，用於載入模型和處理器。"""
-    global model, processor, args
-    logger.info("開始載入模型...")
+    global model, processor, args, opencc_converter
+    print("[INFO] 開始載入模型...")
     if args.cpu_only:
         device_map = 'cpu'
     else:
@@ -78,32 +66,101 @@ def _load_model_processor_internal():
 
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(args.checkpoint_path, **model_kwargs)
     processor = Qwen2_5OmniProcessor.from_pretrained(args.checkpoint_path)
-    logger.info("模型載入完成。")
+    
+    # 初始化 OpenCC 轉換器
+    try:
+        opencc_converter = OpenCC('s2tw')  # 簡體到台灣繁體
+        print("[INFO] OpenCC 轉換器初始化完成 (簡體到台灣繁體)")
+    except Exception as e:
+        print(f"[WARNING] OpenCC 轉換器初始化失敗: {e}")
+        opencc_converter = None
+
+    print("[INFO] 模型載入完成。")
     return model, processor
 
 def unload_model():
-    """卸載模型以釋放記憶體。"""
-    global model, processor, model_lock, IDLE_TIMEOUT
-    with model_lock:
-        if model is not None:
-            logger.info(f"偵測到閒置超過 {IDLE_TIMEOUT} 秒，開始卸載模型...")
-            del model
-            del processor
-            model = None
-            processor = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            logger.info("模型已卸載，記憶體已釋放。")
+    """卸載模型並清除 CUDA 緩存 - 內部使用（假設鎖已被獲取）"""
+    global model, processor
 
-def reset_idle_timer(new_thread=True):
-    """重置閒置計時器。"""
-    global last_activity_time, IDLE_TIMEOUT
+    if model is None:
+        return
+
+    print("[INFO] 由於閒置超時，正在卸載模型...")
+
+    try:
+        # 卸載前將模型組件移至 CPU 以釋放 GPU 記憶體
+        if torch.cuda.is_available():
+            print("[INFO] 正在將模型組件移至 CPU...")
+            try:
+                # 移動主要模型組件至 CPU
+                if hasattr(model, 'model'):
+                    if hasattr(model.model, 'thinker'):
+                        model.model.thinker = model.model.thinker.cpu()
+                    # 如果是 Qwen2_5OmniForConditionalGeneration 類型
+                    elif hasattr(model.model, 'language_model'):
+                        model.model.language_model = model.model.language_model.cpu()
+                elif hasattr(model, 'cpu'):
+                    model.cpu()
+            except Exception as e:
+                print(f"[WARNING] 將模型移至 CPU 時出錯: {e}")
+
+        # 刪除模型和處理器
+        del model
+        del processor
+        model = None
+        processor = None
+
+        # 清除 CUDA 緩存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+            # 列印記憶體狀態
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[INFO] 卸載後 GPU 記憶體: {allocated:.2f} GB 已分配, {reserved:.2f} GB 已保留")
+
+        print("[INFO] 模型已卸載並清除 CUDA 緩存")
+
+    except Exception as e:
+        print(f"[ERROR] 卸載模型時出錯: {e}")
+        import traceback
+        traceback.print_exc()
+
+def update_activity():
+    """更新最後活動時間戳"""
+    global last_activity_time
     last_activity_time = time.time()
-    if new_thread:
-        timer = threading.Timer(IDLE_TIMEOUT, unload_model)
-        timer.daemon = True
-        timer.start()
+
+def idle_monitor():
+    """監控閒置時間，如果閒置太久則卸載模型"""
+    global model, is_processing, last_activity_time
+    idle_check_interval = 30  # 每30秒檢查一次
+    idle_timeout = IDLE_TIMEOUT  # 使用命令行參數設置的超時時間
+
+    while True:
+        time.sleep(idle_check_interval)
+
+        # 跳過正在處理的情況
+        if is_processing:
+            continue
+
+        # 跳過沒有活動記錄的情況
+        if last_activity_time is None:
+            continue
+
+        # 檢查閒置時間
+        idle_time = time.time() - last_activity_time
+
+        if idle_time >= idle_timeout:
+            # 獲取鎖並卸載模型
+            with model_lock:
+                # 獲取鎖後再次檢查條件
+                if model is not None and not is_processing:
+                    print(f"[INFO] 模型閒置 {idle_time:.0f} 秒，正在卸載...")
+                    # 調用 unload_model（它本身不獲取鎖）
+                    unload_model()
+                    last_activity_time = None
 
 def get_model_and_processor():
     """獲取模型和處理器，如果未載入則自動載入。"""
@@ -111,7 +168,7 @@ def get_model_and_processor():
     with model_lock:
         if model is None or processor is None:
             _load_model_processor_internal()
-        reset_idle_timer()
+        update_activity()
         return model, processor
 
 def _generate_request_id():
@@ -129,9 +186,11 @@ def process_long_audio_yield_transcription(input_path: str, request_id: str):
     try:
         probe = ffmpeg.probe(input_path)
         duration = float(probe['format']['duration'])
-        logger.info(f"[{request_id}] 檔案時長: {duration:.2f} 秒")
+        print(f"[{request_id}] 檔案時長: {duration:.2f} 秒")
     except ffmpeg.Error as e:
-        logger.error(f"[{request_id}] 無法讀取檔案資訊 {input_path}: {e.stderr.decode('utf8')}")
+        import traceback
+        print(f"[{request_id}] 無法讀取檔案資訊 {input_path}: {e.stderr.decode('utf8')}")
+        traceback.print_exc()
         return
 
     start_time = 0
@@ -145,7 +204,7 @@ def process_long_audio_yield_transcription(input_path: str, request_id: str):
             break
 
         temp_wav_path = os.path.join('temp', f"{base_filename}_seg{segment_index}.wav")
-        logger.info(f"[{request_id}] 正在提取第 {segment_index + 1}/{total_segments} 段 ({start_time:.2f}s - {start_time + segment_duration:.2f}s)...")
+        print(f"[{request_id}] 正在提取第 {segment_index + 1}/{total_segments} 段 ({start_time:.2f}s - {start_time + segment_duration:.2f}s)...")
 
         try:
             (
@@ -154,7 +213,9 @@ def process_long_audio_yield_transcription(input_path: str, request_id: str):
                 .run(quiet=True, overwrite_output=True)
             )
         except ffmpeg.Error as e:
-            logger.error(f"[{request_id}] FFmpeg 提取失敗: {e.stderr.decode('utf8')}")
+            import traceback
+            print(f"[{request_id}] FFmpeg 提取失敗: {e.stderr.decode('utf8')}")
+            traceback.print_exc()
             start_time += segment_duration_val
             segment_index += 1
             continue
@@ -178,13 +239,20 @@ def process_long_audio_yield_transcription(input_path: str, request_id: str):
             decoded_list = current_processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             transcribed_text = decoded_list[0] if decoded_list else ""
 
+            # 使用 OpenCC 轉換為台灣繁體中文
+            if opencc_converter is not None:
+                transcribed_text = opencc_converter.convert(transcribed_text)
+                print(f"[{request_id}] 已將轉錄結果轉換為台灣繁體中文")
+
             # --- 範本格式日誌輸出 ---
             print(f"[{request_id}] ====== SEGMENT {segment_index+1}/{total_segments} RESULT (starts at {start_time/60:.1f} mins) ======")
             print(transcribed_text)
             print(f"[{request_id}] ====== END OF SEGMENT {segment_index+1} ({len(transcribed_text)} chars) ======")
 
         except Exception as e:
-            logger.error(f"[{request_id}] 轉錄過程中發生錯誤: {e}", exc_info=True)
+            import traceback
+            print(f"[{request_id}] 轉錄過程中發生錯誤: {e}")
+            traceback.print_exc()
             transcribed_text = f"[第 {segment_index + 1} 段轉錄失敗]"
         finally:
             if os.path.exists(temp_wav_path):
@@ -197,26 +265,37 @@ def process_long_audio_yield_transcription(input_path: str, request_id: str):
 
 def transcribe_file_task(input_path: str, output_filename: str, request_id: str):
     """Curl 任務的背景處理函式。"""
-    logger.info(f"[{request_id}] 開始背景轉錄任務: {input_path}")
-    output_txt_path = os.path.join('outputs', output_filename)
-    all_segments_text = []
-    with open(output_txt_path, 'a', encoding='utf-8') as f:
-        for segment_text in process_long_audio_yield_transcription(input_path, request_id):
-            f.write(segment_text + '\n')
-            all_segments_text.append(segment_text)
+    global is_processing
+    
+    # 標記為正在處理，防止模型卸載
+    is_processing = True
+    update_activity()
+    
+    try:
+        print(f"[{request_id}] 開始背景轉錄任務: {input_path}")
+        output_txt_path = os.path.join('outputs', output_filename)
+        all_segments_text = []
+        with open(output_txt_path, 'a', encoding='utf-8') as f:
+            for segment_text in process_long_audio_yield_transcription(input_path, request_id):
+                f.write(segment_text + '\n')
+                all_segments_text.append(segment_text)
 
-    merged_result = "\n".join(all_segments_text)
-    
-    # --- 範本格式日誌輸出 ---
-    print(f"[{request_id}] ====== FINAL COMBINED TRANSCRIPTION ======")
-    print(merged_result)
-    print(f"[{request_id}] ====== END OF COMBINED TRANSCRIPTION ({len(merged_result)} chars) ======")
-    
-    print(f"[{request_id}] ====== SAVED TRANSCRIPTION to {output_txt_path} ======")
-    print(merged_result)
-    print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
-    
-    logger.info(f"[{request_id}] 檔案 {input_path} 處理完成。")
+        merged_result = "\n".join(all_segments_text)
+        
+        # --- 範本格式日誌輸出 ---
+        print(f"[{request_id}] ====== FINAL COMBINED TRANSCRIPTION ======")
+        print(merged_result)
+        print(f"[{request_id}] ====== END OF COMBINED TRANSCRIPTION ({len(merged_result)} chars) ======")
+        
+        print(f"[{request_id}] ====== SAVED TRANSCRIPTION to {output_txt_path} ======")
+        print(merged_result)
+        print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
+        
+        print(f"[{request_id}] 檔案 {input_path} 處理完成。")
+    finally:
+        # 標記為處理完成，允許模型卸載
+        is_processing = False
+        update_activity()
 
 # --- FastAPI 應用和端點 ---
 app = FastAPI()
@@ -235,8 +314,21 @@ async def create_transcription_job(background_tasks: BackgroundTasks, file: Uplo
     with open(input_filepath, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     output_txt_filename = f"{timestamp}.txt"
-    logger.info(f"[{request_id}] 收到檔案: {file.filename}，已保存至 {input_filepath}。")
-    background_tasks.add_task(transcribe_file_task, input_filepath, output_txt_filename, request_id)
+    print(f"[{request_id}] 收到檔案: {file.filename}，已保存至 {input_filepath}。")
+    
+    # 使用序列化鎖處理請求
+    def task_wrapper():
+        with processing_lock:
+            global is_processing
+            is_processing = True
+            update_activity()
+            try:
+                transcribe_file_task(input_filepath, output_txt_filename, request_id)
+            finally:
+                is_processing = False
+                update_activity()
+    
+    background_tasks.add_task(task_wrapper)
     return {"message": "檔案上傳成功，已開始背景轉錄處理。", "request_id": request_id, "output_file": os.path.join('outputs', output_txt_filename)}
 
 # --- Gradio 應用邏輯 ---
@@ -247,39 +339,61 @@ def _launch_demo(args_param):
     if args.audio_only:
         default_prompt_for_ui = USER_PROMPT_BIBLE_TRANSCRIPTION
         is_interactive_prompt = False
-        logger.info("在 audio-only 模式下運行，使用預設的 ASR 提示詞。")
+        print("[INFO] 在 audio-only 模式下運行，使用預設的 ASR 提示詞。")
     else:
         default_prompt_for_ui = 'You are Qwen, a virtual human...'
         is_interactive_prompt = True
 
     def process_gradio_audio(audio_path, history, system_prompt):
-        request_id = _generate_request_id()
-        history.append({"role": "user", "content": (audio_path,)})
-        history.append({"role": "assistant", "content": ""})
-        yield history
-
-        full_transcription = ""
-        for segment_text in process_long_audio_yield_transcription(audio_path, request_id):
-            full_transcription += segment_text + " "
-            history[-1]["content"] = full_transcription.strip()
-            yield history
+        global is_processing
         
-        print(f"[{request_id}] ====== FINAL GRADIO TRANSCRIPTION ======")
-        print(full_transcription.strip())
-        print(f"[{request_id}] ====== END OF GRADIO TRANSCRIPTION ({len(full_transcription.strip())} chars) ======")
+        # 標記為正在處理，防止模型卸載
+        is_processing = True
+        update_activity()
+        
+        try:
+            request_id = _generate_request_id()
+            history.append({"role": "user", "content": (audio_path,)})
+            history.append({"role": "assistant", "content": ""})
+            yield history
+
+            full_transcription = ""
+            for segment_text in process_long_audio_yield_transcription(audio_path, request_id):
+                full_transcription += segment_text + " "
+                history[-1]["content"] = full_transcription.strip()
+                yield history
+            
+            print(f"[{request_id}] ====== FINAL GRADIO TRANSCRIPTION ======")
+            print(full_transcription.strip())
+            print(f"[{request_id}] ====== END OF GRADIO TRANSCRIPTION ({len(full_transcription.strip())} chars) ======")
+        finally:
+            # 標記為處理完成，允許模型卸載
+            is_processing = False
+            update_activity()
 
     def predict_multimodal(history, system_prompt, voice_choice):
-        request_id = _generate_request_id()
-        formatted_history = format_history(history, system_prompt)
-        history.append({"role": "assistant", "content": ""})
+        global is_processing
+        
+        # 標記為正在處理，防止模型卸載
+        is_processing = True
+        update_activity()
+        
+        try:
+            request_id = _generate_request_id()
+            formatted_history = format_history(history, system_prompt)
+            history.append({"role": "assistant", "content": ""})
 
-        for chunk in predict(formatted_history, voice_choice, request_id):
-            if chunk["type"] == "text":
-                history[-1]["content"] = chunk["data"]
-                yield history
-            if chunk["type"] == "audio":
-                history.append({"role": "assistant", "content": gr.Audio(chunk["data"])})
-                yield history
+            for chunk in predict(formatted_history, voice_choice, request_id):
+                if chunk["type"] == "text":
+                    history[-1]["content"] = chunk["data"]
+                    yield history
+                if chunk["type"] == "audio":
+                    history.append({"role": "assistant", "content": gr.Audio(chunk["data"])})
+                    yield history
+        finally:
+            # 標記為處理完成，允許模型卸載
+            is_processing = False
+            update_activity()
 
     def format_history(history, system_prompt):
         messages = [{"role": "system", "content": [{"type": "text", "text": system_prompt}]}]
@@ -314,6 +428,11 @@ def _launch_demo(args_param):
         generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, text_ids)]
         decoded_list = current_processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         response = decoded_list[0] if decoded_list else ""
+        
+        # 使用 OpenCC 轉換為台灣繁體中文
+        if opencc_converter is not None and audios:  # 只在有音訊輸入時進行轉換
+            response = opencc_converter.convert(response)
+            print(f"[{request_id}] 已將轉錄結果轉換為台灣繁體中文")
         
         # --- 範本格式日誌輸出 (for short audio/text) ---
         if audios: # 只在有音訊輸入時打印轉錄日誌
@@ -444,10 +563,15 @@ if __name__ == "__main__":
     IDLE_TIMEOUT = cli_args.idle_timeout
     gradio_app = _launch_demo(cli_args)
     app = gr.mount_gradio_app(app, gradio_app, path="/")
-    reset_idle_timer()
-    logger.info(f"啟動伺服器於 http://{cli_args.host}:{cli_args.port}")
-    logger.info(f"Gradio UI 介面位於 http://{cli_args.host}:{cli_args.port}/")
-    logger.info(f"Curl API 端點位於 http://{cli_args.host}:{cli_args.port}/transcribe/")
+    
+    # 啟動閒置監控線程
+    monitor_thread = threading.Thread(target=idle_monitor, daemon=True)
+    monitor_thread.start()
+    print(f"[INFO] 閒置監控已啟動 (超時時間: {IDLE_TIMEOUT}s)")
+    
+    print(f"[INFO] 啟動伺服器於 http://{cli_args.host}:{cli_args.port}")
+    print(f"[INFO] Gradio UI 介面位於 http://{cli_args.host}:{cli_args.port}/")
+    print(f"[INFO] Curl API 端點位於 http://{cli_args.host}:{cli_args.port}/transcribe/")
     import uvicorn
     uvicorn.run(app, host=cli_args.host, port=cli_args.port)
 

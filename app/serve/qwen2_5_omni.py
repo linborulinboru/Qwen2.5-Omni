@@ -416,6 +416,12 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
 
     print(f"[{request_id}] Processing audio file: {audio_path}")
 
+    # Create output file for accumulating results
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    output_filename = f"{request_id}_{timestamp}.txt"
+    output_path = os.path.join(OUTPUTS_DIR, output_filename)
+    print(f"[{request_id}] Output file: {output_path}")
+
     # Convert to WAV if needed
     converted_path = None
 
@@ -481,9 +487,21 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 print(f"[{request_id}] ====== END OF SEGMENT {idx+1} ({len(result)} chars) ======")
                 print()  # Empty line for readability
 
+                # Append segment result to output file immediately
+                with open(output_path, 'a', encoding='utf-8') as f:
+                    if idx > 0:
+                        f.write("\n\n")  # Add separator between segments
+                    f.write(result)
+                print(f"[{request_id}] Segment {idx+1} appended to: {output_path}")
+
             except Exception as e:
                 print(f"[{request_id}] Segment {idx} failed: {e}")
                 results.append(f"[Error in segment {idx}]")
+                # Append error to output file
+                with open(output_path, 'a', encoding='utf-8') as f:
+                    if idx > 0:
+                        f.write("\n\n")
+                    f.write(f"[Error in segment {idx}]")
 
             # Clean up segment file
             try:

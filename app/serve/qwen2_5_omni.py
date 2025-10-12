@@ -401,6 +401,13 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         # Extract response from list
         response = text_output[0] if isinstance(text_output, list) else text_output
 
+        # Extract only the actual transcription content, removing system/user/assistant tags
+        # The transcription should be the part after the last "assistant\n" tag
+        if "assistant\n" in response:
+            response = response.split("assistant\n")[-1].strip()
+        elif "assistant\n\n" in response:
+            response = response.split("assistant\n\n")[-1].strip()
+
         # Simplified to Traditional Chinese conversion
         if enable_s2t and opencc_converter is not None:
             try:
@@ -817,7 +824,18 @@ def _launch_demo(args, model, processor):
         text_ids, audio = model.generate(**inputs, speaker=voice, use_audio_in_video=True)
 
         response = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-        response = response[0].split("\n")[-1]
+        response = response[0]
+        
+        # Extract only the actual response content, removing system/user/assistant tags
+        # The response should be the part after the last "assistant\n" tag
+        if "assistant\n" in response:
+            response = response.split("assistant\n")[-1].strip()
+        elif "assistant\n\n" in response:
+            response = response.split("assistant\n\n")[-1].strip()
+        else:
+            # Fallback: just take the last line as before
+            response = response.split("\n")[-1]
+        
         yield {"type": "text", "data": response}
 
         audio = np.array(audio * 32767).astype(np.int16)

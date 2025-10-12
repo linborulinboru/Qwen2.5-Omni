@@ -114,16 +114,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --no-cache-dir scikit-build-core[pyproject] pathspec pybind11
 
 # 使用 CUDA 加速版本
-# 添加 CUDA stub 庫路徑到 LDFLAGS,解決建構時找不到 libcuda.so.1 的問題
-ENV CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=all"
-ENV FORCE_CMAKE=1
 ENV CUDACXX=/usr/local/cuda/bin/nvcc
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
-    CUDA_DOCKER_ARCH=all \
     LLAMA_CUDA=1 \
+    FORCE_CMAKE=1 \
     CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=all" \
-    LDFLAGS="-L/usr/local/cuda/lib64/stubs" \
     pip3 install --no-cache-dir llama-cpp-python --no-build-isolation
 
 # ==================== 應用程式安裝 ====================

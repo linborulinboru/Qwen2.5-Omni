@@ -453,19 +453,24 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
     system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
     user_prompt = "請將音訊內容精確轉錄為中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
 
-    messages = [
-        {"role": "system", "content": [
-            {"type": "text", "text": system_prompt},
-        ]},
-        {"role": "user", "content": [
-            {"type": "audio", "audio": audio_path},
-            {"type": "text", "text": user_prompt}
-        ]},
-    ]
-
     print(f"[{request_id}] Processing audio file...")
 
     try:
+        # Load audio using librosa
+        import librosa
+        audio_array, sr = librosa.load(audio_path, sr=16000, mono=True)
+
+        # Create messages with audio array
+        messages = [
+            {"role": "system", "content": [
+                {"type": "text", "text": system_prompt},
+            ]},
+            {"role": "user", "content": [
+                {"type": "audio", "audio": audio_array},
+                {"type": "text", "text": user_prompt}
+            ]},
+        ]
+
         # Apply chat template
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 

@@ -71,17 +71,14 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 # ==================== Model Loading with Memory Optimization ====================
 
 def _load_model_processor(args):
-    """
-    Loads the Qwen2.5-Omni model and processor with error handling for FP8 precision.
-    """
     global model, processor, opencc_converter, last_activity_time, model_config
-
+    
     with model_lock:
         if model is not None:
             print("Model already loaded")
             last_activity_time = time.time()
             return model, processor
-
+        
         # Initialize OpenCC converter for Simplified to Traditional Chinese
         if opencc_converter is None:
             try:
@@ -98,41 +95,41 @@ def _load_model_processor(args):
             'cpu_only': args.cpu_only
         }
 
-        device_map = 'cpu' if args.cpu_only else 'cuda'
+        if args.cpu_only:
+            device_map = 'cpu'
+        else:
+            device_map = 'cuda'
 
-        # Prepare arguments for model loading
-        model_kwargs = {
-            'torch_dtype': 'auto',
-            'device_map': device_map
-        }
+        # Check if flash-attn2 flag is enabled and load model accordingly
         if args.flash_attn2:
-            model_kwargs['attn_implementation'] = 'flash_attention_2'
-
-        try:
-            # Attempt to load the model with the specified dtype
             model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
                 args.checkpoint_path,
-                **model_kwargs
+                torch_dtype='auto',
+                attn_implementation='flash_attention_2',
+                device_map=device_map
             )
-        except TypeError as e:
-            # If it's a TypeError, it's unexpected, so re-raise it
-            raise e
+        else:
+            model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                args.checkpoint_path, 
+                device_map=device_map, 
+                torch_dtype='auto'
+            )
 
         processor = Qwen2_5OmniProcessor.from_pretrained(args.checkpoint_path)
-
+        
+        # In audio-only mode, we might want to optimize memory usage
         if args.audio_only:
             print("Running in audio-only mode - model loaded for audio processing only")
-
+        
         # Print GPU memory usage
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**3
             reserved = torch.cuda.memory_reserved() / 1024**3
             print(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
-
+        
         print("Model loaded successfully!")
         last_activity_time = time.time()
         return model, processor
-
 
 def unload_model():
     """Unload model and clear CUDA cache - INTERNAL USE ONLY (assumes lock is held)"""
@@ -257,11 +254,11 @@ def convert_to_wav(input_path, request_id):
         cmd = [
             'ffmpeg',
             '-i', input_path,
-            '-vn',                # No video
+            '-vn',               # No video
             '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian
-            '-ar', '16000',          # Sample rate 16kHz
-            '-ac', '1',              # Mono
-            '-y',                  # Overwrite output file
+            '-ar', '16000',      # Sample rate 16kHz
+            '-ac', '1',          # Mono
+            '-y',                # Overwrite output file
             output_path
         ]
 
@@ -357,10 +354,8 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
         # Use process_mm_info like official demo
         audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-        
-        # For audio-only mode, we can potentially optimize by focusing on audio processing
-        # For now, we'll pass all modalities as the model expects them
-        # In future, this could be optimized to disable visual processing if possible
+
+        # Process inputs
         inputs = processor(
             text=text,
             audio=audios,
@@ -762,7 +757,7 @@ def _launch_demo(args, model, processor):
         if language == 'zh':
             return cn_text
         return text
-    
+   
     def convert_webm_to_mp4(input_file, output_file):
         try:
             (
@@ -783,7 +778,7 @@ def _launch_demo(args, model, processor):
             if isinstance(item["content"], str):
                 messages.append({"role": item['role'], "content": item['content']})
             elif item["role"] == "user" and (isinstance(item["content"], list) or
-                                             isinstance(item["content"], tuple)):
+                                            isinstance(item["content"], tuple)):
                 file_path = item["content"][0]
 
                 mime_type = client_utils.get_mimetype(file_path)
@@ -872,7 +867,7 @@ def _launch_demo(args, model, processor):
                 history.append({"role": "user", "content": (f, )})
 
         formatted_history = format_history(history=history,
-                                           system_prompt=system_prompt,)
+                                        system_prompt=system_prompt,)
 
 
         history.append({"role": "assistant", "content": ""})
@@ -920,7 +915,7 @@ def _launch_demo(args, model, processor):
             history.append({"role": "user", "content": (video, )})
 
         formatted_history = format_history(history=history,
-                                           system_prompt=system_prompt)
+                                        system_prompt=system_prompt)
 
         yield None, None, None, None, history
 
@@ -940,16 +935,16 @@ def _launch_demo(args, model, processor):
     with gr.Blocks() as demo, ms.Application(), antd.ConfigProvider():
         with gr.Sidebar(open=False):
             system_prompt_textbox = gr.Textbox(label="System Prompt",
-                                               value=default_system_prompt)
+                                            value=default_system_prompt)
         with antd.Flex(gap="small", justify="center", align="center"):
             with antd.Flex(vertical=True, gap="small", align="center"):
                 antd.Typography.Title("Qwen2.5-Omni Demo",
-                                      level=1,
-                                      elem_style=dict(margin=0, fontSize=28))
+                                    level=1,
+                                    elem_style=dict(margin=0, fontSize=28))
                 with antd.Flex(vertical=True, gap="small"):
                     antd.Typography.Text(get_text("🎯 Instructions for use:",
-                                                 "🎯 使用说明："),
-                                         strong=True)
+                                                "🎯 使用说明："),
+                                        strong=True)
                     antd.Typography.Text(
                         get_text(
                             "1️⃣ Click the Audio Record button or the Camera Record button.",
@@ -961,19 +956,19 @@ def _launch_demo(args, model, processor):
                             "3️⃣ Click the submit button and wait for the model's response.",
                             "3️⃣ 点击提交并等待模型的回答"))
         voice_choice = gr.Dropdown(label="Voice Choice",
-                                   choices=VOICE_LIST,
-                                   value=DEFAULT_VOICE)
+                                choices=VOICE_LIST,
+                                value=DEFAULT_VOICE)
         with gr.Tabs():
             with gr.Tab("Online"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         microphone = gr.Audio(sources=['microphone'],
-                                              type="filepath")
+                                            type="filepath")
                         webcam = gr.Video(sources=['webcam'],
-                                          height=400,
-                                          include_audio=True)
+                                        height=400,
+                                        include_audio=True)
                         submit_btn = gr.Button(get_text("Submit", "提交"),
-                                               variant="primary")
+                                            variant="primary")
                         stop_btn = gr.Button(get_text("Stop", "停止"), visible=False)
                         clear_btn = gr.Button(get_text("Clear History", "清除历史"))
                     with gr.Column(scale=2):
@@ -1011,19 +1006,19 @@ def _launch_demo(args, model, processor):
                 # Media upload section in one row
                 with gr.Row(equal_height=True):
                     audio_input = gr.Audio(sources=["upload"],
-                                           type="filepath",
-                                           label="Upload Audio",
-                                           elem_classes="media-upload",
-                                           scale=1)
+                                        type="filepath",
+                                        label="Upload Audio",
+                                        elem_classes="media-upload",
+                                        scale=1)
                     image_input = gr.Image(sources=["upload"],
-                                           type="filepath",
-                                           label="Upload Image",
-                                           elem_classes="media-upload",
-                                           scale=1)
+                                        type="filepath",
+                                        label="Upload Image",
+                                        elem_classes="media-upload",
+                                        scale=1)
                     video_input = gr.Video(sources=["upload"],
-                                           label="Upload Video",
-                                           elem_classes="media-upload",
-                                           scale=1)
+                                        label="Upload Video",
+                                        elem_classes="media-upload",
+                                        scale=1)
 
                 # Text input section
                 text_input = gr.Textbox(show_label=False,
@@ -1032,13 +1027,13 @@ def _launch_demo(args, model, processor):
                 # Control buttons
                 with gr.Row():
                     submit_btn = gr.Button(get_text("Submit", "提交"),
-                                           variant="primary",
-                                           size="lg")
+                                        variant="primary",
+                                        size="lg")
                     stop_btn = gr.Button(get_text("Stop", "停止"),
-                                         visible=False,
-                                         size="lg")
+                                        visible=False,
+                                        size="lg")
                     clear_btn = gr.Button(get_text("Clear History", "清除历史"),
-                                          size="lg")
+                                        size="lg")
 
                 def clear_chat_history():
                     return [], gr.update(value=None), gr.update(
@@ -1056,11 +1051,11 @@ def _launch_demo(args, model, processor):
                     ])
 
                 stop_btn.click(fn=lambda:
-                               (gr.update(visible=True), gr.update(visible=False)),
-                               inputs=None,
-                               outputs=[submit_btn, stop_btn],
-                               cancels=[submit_event],
-                               queue=False)
+                            (gr.update(visible=True), gr.update(visible=False)),
+                            inputs=None,
+                            outputs=[submit_btn, stop_btn],
+                            cancels=[submit_event],
+                            queue=False)
 
                 clear_btn.click(fn=clear_chat_history,
                                 inputs=None,
@@ -1105,11 +1100,11 @@ def _launch_demo(args, model, processor):
     flask_thread.start()
     
     demo.queue(default_concurrency_limit=100, max_size=100).launch(max_threads=100,
-                                                                   ssr_mode=False,
-                                                                   share=args.share,
-                                                                   inbrowser=args.inbrowser,
-                                                                   server_port=args.server_port,
-                                                                   server_name=args.server_name,)
+                                                                ssr_mode=False,
+                                                                share=args.share,
+                                                                inbrowser=args.inbrowser,
+                                                                server_port=args.server_port,
+                                                                server_name=args.server_name,)
 
 
 DEFAULT_CKPT_PATH = "Qwen/Qwen2.5-Omni-7B"
@@ -1152,8 +1147,6 @@ def _get_args():
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')
-    
-
 
     args = parser.parse_args()
     return args
@@ -1176,7 +1169,7 @@ if __name__ == "__main__":
     
     print(f"[INFO] Starting Flask API on {args.flask_host}:{args.flask_port}")
     print(f"[INFO] Available endpoints:")
-    print(f"  GET  /health            - Health check")
+    print(f"  GET  /health             - Health check")
     print(f"  POST /transcribe         - Transcribe audio (returns text file)")
     print(f"  POST /transcribe/json    - Transcribe audio (returns JSON)")
     

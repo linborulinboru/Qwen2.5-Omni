@@ -26,7 +26,7 @@ services:
       "--port", "5000",
       "--flash-attn2",
       "--audio-only",
-      "--segment-duration", "60",
+      "--segment-duration", "30",
       "--max-new-tokens", "8192",
       "--temperature", "0.1",
       "--repetition-penalty", "1.1",

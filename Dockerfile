@@ -117,6 +117,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ENV CUDACXX=/usr/local/cuda/bin/nvcc
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
+    CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) \
     LLAMA_CUDA=1 \
     FORCE_CMAKE=1 \
     CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=all" \

@@ -191,11 +191,14 @@ def idle_monitor():
 # ==================== Audio Processing ====================
 
 def sanitize_filename(filename):
-    """Sanitize filename for security"""
+    """Sanitize filename for security - preserves Unicode characters"""
     import re
-    # Remove path separators and dangerous characters
+    # Remove path separators and dangerous characters, but keep Unicode chars
     filename = os.path.basename(filename)
-    filename = re.sub(r'[^\w\s\-\.]', '', filename)
+    # Remove only dangerous characters: / \ : * ? " < > |
+    filename = re.sub(r'[/\\:*?"<>|]', '', filename)
+    # Replace multiple spaces with single space
+    filename = re.sub(r'\s+', ' ', filename)
     return filename[:255]  # Limit length
 
 def convert_to_wav(input_path, request_id):
@@ -230,21 +233,19 @@ def convert_to_wav(input_path, request_id):
         print(f"[{request_id}] File magic bytes suggest MP4: {is_mp4}")
 
         # FFmpeg command: convert to 16kHz mono WAV
-        cmd = ['ffmpeg']
-
-        # If it looks like MP4 but has wrong extension, specify format
-        if is_mp4:
-            cmd.extend(['-f', 'mov,mp4,m4a,3gp,3g2,mj2'])  # MP4 demuxer
-
-        cmd.extend([
+        # Use simple, robust settings that work for all formats
+        cmd = [
+            'ffmpeg',
             '-i', input_path,
             '-vn',               # No video
+            '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian
             '-ar', '16000',      # Sample rate 16kHz
             '-ac', '1',          # Mono
-            '-f', 'wav',         # WAV format output
             '-y',                # Overwrite output file
             output_path
-        ])
+        ]
+
+        print(f"[{request_id}] FFmpeg command: {' '.join(cmd)}")
 
         # Run FFmpeg
         result = subprocess.run(
@@ -257,9 +258,17 @@ def convert_to_wav(input_path, request_id):
         if result.returncode != 0:
             error_msg = result.stderr.decode('utf-8', errors='ignore')
             print(f"[{request_id}] FFmpeg stderr: {error_msg}")
-            raise RuntimeError(f"FFmpeg conversion failed (returncode {result.returncode})")
+            raise RuntimeError(f"FFmpeg conversion failed (returncode {result.returncode}): {error_msg}")
 
-        print(f"[{request_id}] Conversion successful: {output_path}")
+        # Verify output file was created and has content
+        if not os.path.exists(output_path):
+            raise RuntimeError("FFmpeg did not create output file")
+
+        output_size = os.path.getsize(output_path)
+        if output_size == 0:
+            raise RuntimeError("FFmpeg created empty output file")
+
+        print(f"[{request_id}] Conversion successful: {output_path} ({output_size} bytes)")
         return output_path
 
     except subprocess.TimeoutExpired:
@@ -299,7 +308,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
 
     # Messages with transcription prompt
     system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
-    user_prompt = "請將音訊內容精確轉錄為繁體中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
+    user_prompt = "請將音訊內容精確轉錄為中文文字。格式要求：1) 標點符號：每句話以句號(。)、問號(?)或驚嘆號(!)結尾,語意停頓處加入逗號(,)、頓號(、)或分號(;) 2) 聖經引用格式：使用《書卷名章:節》格式,例如《約翰福音3:16》神愛世人,甚至將他的獨生子賜給他們,叫一切信他的,不致滅亡,反得永生。聖經書卷包含：舊約(創世記、出埃及記、利未記、民數記、申命記、約書亞記、士師記、路得記、撒母耳記上、撒母耳記下、列王紀上、列王紀下、歷代志上、歷代志下、以斯拉記、尼希米記、以斯帖記、約伯記、詩篇、箴言、傳道書、雅歌、以賽亞書、耶利米書、耶利米哀歌、以西結書、但以理書、何西阿書、約珥書、阿摩司書、俄巴底亞書、約拿書、彌迦書、那鴻書、哈巴谷書、西番雅書、哈該書、撒迦利亞書、瑪拉基書)、新約(馬太福音、馬可福音、路加福音、約翰福音、使徒行傳、羅馬書、哥林多前書、哥林多後書、加拉太書、以弗所書、腓立比書、歌羅西書、帖撒羅尼迦前書、帖撒羅尼迦後書、提摩太前書、提摩太後書、提多書、腓利門書、希伯來書、雅各書、彼得前書、彼得後書、約翰一書、約翰二書、約翰三書、猶大書、啟示錄) 3) 直接輸出轉錄文字,不包含任何解釋、評論、標記或元資料。"
 
     messages = [
         {"role": "system", "content": [
@@ -343,9 +352,20 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
                 do_sample=temperature > 0,
             )
 
-        # Decode - standard model returns tensor directly, not tuple
+        # Decode - handle different output formats
+        # The generated_ids might be a tuple or tensor
+        # For standard model, it's just a tensor; extract appropriately
+        if isinstance(generated_ids, tuple):
+            # If it's a tuple, take the first element (the token IDs)
+            generated_ids = generated_ids[0]
+
+        if isinstance(generated_ids, torch.Tensor):
+            if generated_ids.dim() > 1 and generated_ids.size(0) == 1:
+                # Single batch: extract first element [1, seq_len] -> [seq_len]
+                generated_ids = generated_ids[0]
+
         text_output = processor.batch_decode(
-            generated_ids,
+            [generated_ids] if isinstance(generated_ids, torch.Tensor) and generated_ids.dim() == 1 else generated_ids,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False
         )
@@ -454,7 +474,13 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
             try:
                 result = transcribe_audio_file(temp_file, f"{request_id}_seg{idx}", **kwargs)
                 results.append(result)
-                print(f"[{request_id}] Segment {idx+1}/{len(segments)} completed: {len(result)} chars")
+
+                # Output segment result to log immediately
+                print(f"[{request_id}] ====== SEGMENT {idx+1}/{len(segments)} RESULT (starts at {segment_start_mins:.1f} mins) ======")
+                print(result)
+                print(f"[{request_id}] ====== END OF SEGMENT {idx+1} ({len(result)} chars) ======")
+                print()  # Empty line for readability
+
             except Exception as e:
                 print(f"[{request_id}] Segment {idx} failed: {e}")
                 results.append(f"[Error in segment {idx}]")
@@ -811,6 +837,116 @@ def check_status(job_id):
 
         return jsonify(job_status[job_id])
 
+@app.route('/transcribe/file', methods=['POST'])
+def transcribe_file():
+    """
+    Transcribe a file that already exists in /app/inputs directory
+
+    Usage:
+        POST /transcribe/file
+        Content-Type: application/json
+        {
+            "filename": "20250912 聖經學校 16 罪與悔改 翻譯語音.mp4",
+            "segment_duration": 60,
+            "max_new_tokens": 8192,
+            "temperature": 0.1,
+            "repetition_penalty": 1.1,
+            "enable_s2t": true
+        }
+    """
+    global model, model_config, is_processing
+
+    # Auto-reload model if needed
+    if model is None and model_config:
+        print("[INFO] Model not loaded, reloading...")
+        load_model_processor(**model_config)
+    elif model is None:
+        return jsonify({"error": "Model not loaded and no configuration available"}), 503
+
+    # Get JSON data
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
+
+    # Get filename
+    filename = data.get('filename')
+    if not filename:
+        return jsonify({"error": "No filename provided"}), 400
+
+    # Sanitize filename for security
+    filename = sanitize_filename(filename)
+
+    # Check if file exists
+    input_path = os.path.join(INPUTS_DIR, filename)
+    if not os.path.exists(input_path):
+        return jsonify({"error": f"File not found: {filename}"}), 404
+
+    # Generate request ID
+    request_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    print(f"[{request_id}] Processing file from inputs: {filename}")
+
+    try:
+        # Process with lock to serialize requests
+        with processing_lock:
+            # Mark as processing to prevent idle unload
+            is_processing = True
+            update_activity()
+
+            print(f"[{request_id}] Starting transcription...")
+
+            # Get parameters from JSON
+            segment_duration = int(data.get('segment_duration', 300))
+            max_new_tokens = int(data.get('max_new_tokens', 8192))
+            temperature = float(data.get('temperature', 0.1))
+            repetition_penalty = float(data.get('repetition_penalty', 1.1))
+            enable_s2t = data.get('enable_s2t', True)
+
+            # Transcribe
+            transcription = process_audio_segments(
+                input_path,
+                request_id,
+                segment_duration=segment_duration,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                enable_s2t=enable_s2t
+            )
+
+            # Save output
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            output_filename = f"{timestamp}.txt"
+            output_path = os.path.join(OUTPUTS_DIR, output_filename)
+
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(transcription)
+
+            print(f"[{request_id}] Transcription saved to: {output_path}")
+            print(f"[{request_id}] ====== SAVED TRANSCRIPTION ======")
+            print(transcription)
+            print(f"[{request_id}] ====== END OF SAVED TRANSCRIPTION ======")
+
+            return jsonify({
+                "status": "success",
+                "transcription": transcription,
+                "output_file": output_filename,
+                "timestamp": datetime.now().isoformat()
+            })
+
+    except Exception as e:
+        print(f"[{request_id}] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        # Mark processing complete
+        is_processing = False
+        update_activity()
+
 # ==================== Main ====================
 
 def main():
@@ -880,6 +1016,7 @@ def main():
     print(f"  POST /transcribe/json    - Transcribe audio (returns JSON)")
     print(f"  POST /transcribe/srt     - Transcribe audio (returns SRT)")
     print(f"  POST /transcribe/async   - Start async transcription")
+    print(f"  POST /transcribe/file    - Transcribe file from /app/inputs directory")
     print(f"  GET  /status/<job_id>    - Check async job status")
     print(f"  GET  /health             - Health check")
     print("=" * 60)

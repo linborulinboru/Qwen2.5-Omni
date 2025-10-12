@@ -1,0 +1,8 @@
+{
+  "filename": "2025 04 05 攝理聖經學校入學典禮 翻譯錄音檔 臺灣翻譯.mp4",
+  "segment_duration": 60,
+  "max_new_tokens": 8192,
+  "temperature": 0.1,
+  "repetition_penalty": 1.1,
+  "enable_s2t": true
+}

@@ -681,7 +681,7 @@ def _transcribe_impl(return_format='file'):
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters
-            segment_duration = int(request.form.get('segment_duration', 30))
+            segment_duration = int(request.form.get('segment_duration', 300))
             max_new_tokens = int(request.form.get('max_new_tokens', 8192))
             temperature = float(request.form.get('temperature', 0.1))
             repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
@@ -1159,7 +1159,7 @@ def _get_args():
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to (for compatibility)')
     parser.add_argument('--port', type=int, default=7860, help='Port to bind to (for compatibility)')
     parser.add_argument('--audio-only', action='store_true', help='Audio only mode (for compatibility)')
-    parser.add_argument('--segment-duration', type=int, default=30, help='Audio segment duration in seconds (for compatibility)')
+    parser.add_argument('--segment-duration', type=int, default=300, help='Audio segment duration in seconds (for compatibility)')
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')

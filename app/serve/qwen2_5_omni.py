@@ -425,6 +425,9 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
                 print(f"[{request_id}] Warning: OpenCC conversion failed: {e}")
 
         print(f"[{request_id}] Transcription complete: {len(response)} chars")
+        print(f"[{request_id}] ====== TRANSCRIPTION RESULT ======")
+        print(response)
+        print(f"[{request_id}] ====== END OF TRANSCRIPTION ======")
 
         return response
 

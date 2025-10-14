@@ -5,6 +5,7 @@ services:
     container_name: qwen2.5-omni-http
     ports:
       - "5020:5000"
+      - "5021:7860"
     volumes:
       - ./app/serve:/app/serve
       - ./app/inputs:/app/inputs
@@ -24,8 +25,9 @@ services:
       "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B",
       "--host", "0.0.0.0",
       "--port", "5000",
+      "--server-name", "0.0.0.0",
+      "--server-port", "7860",
       "--flash-attn2",
-      "--audio-only",
       "--segment-duration", "30",
       "--max-new-tokens", "8192",
       "--temperature", "0.1",
@@ -39,164 +41,6 @@ services:
       - qwen_network
     profiles:
       - general
-
-  # HTTP Transcription Service (AWQ Quantized #1) - This service builds the shared image.
-  qwen2.5-omni-http-awq:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: qwen2.5-omni-app:latest
-    container_name: qwen2.5-omni-http-awq
-    ports:
-      - "5021:5000"
-    volumes:
-      - ./app/serve:/app/serve
-      - ./app/inputs:/app/inputs
-      - ./app/temp:/app/temp
-      - ./app/outputs:/app/outputs
-      - ./app/Qwen:/app/Qwen
-    working_dir: /app
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, utility, compute]
-    command: [
-      "python3", "serve/qwen2_5_omni_awq.py",
-      "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B-AWQ",
-      "--host", "0.0.0.0",
-      "--port", "5000",
-      "--flash-attn2",
-      "--audio-only",
-      "--segment-duration", "60",
-      "--max-new-tokens", "8192",
-      "--temperature", "0.1",
-      "--repetition-penalty", "1.1",
-      "--idle-timeout", "600"
-    ]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-    networks:
-      - qwen_network
-    profiles: ["awq"]
-
-  # HTTP Transcription Service (AWQ Quantized #2) - Second parallel instance
-  qwen2.5-omni-http-awq2:
-    image: qwen2.5-omni-app:latest
-    container_name: qwen2.5-omni-http-awq2
-    ports:
-      - "5022:5000"
-    volumes:
-      - ./app/serve:/app/serve
-      - ./app/inputs:/app/inputs
-      - ./app/temp:/app/temp
-      - ./app/outputs:/app/outputs
-      - ./app/Qwen:/app/Qwen
-    working_dir: /app
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, utility, compute]
-    command: [
-      "python3", "serve/qwen2_5_omni_awq.py",
-      "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B-AWQ",
-      "--host", "0.0.0.0",
-      "--port", "5000",
-      "--flash-attn2",
-      "--audio-only",
-      "--segment-duration", "60",
-      "--max-new-tokens", "8192",
-      "--temperature", "0.1",
-      "--repetition-penalty", "1.1",
-      "--idle-timeout", "600"
-    ]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-    networks:
-      - qwen_network
-    profiles: ["awq"]
-
-
-  # HTTP Transcription Service (GGUF Quantized) - This service uses the shared image.
-  qwen2.5-omni-http-gguf:
-    image: qwen2.5-omni-app:latest
-    container_name: qwen2.5-omni-http-gguf
-    ports:
-      - "5029:5000"
-    volumes:
-      - ./app/serve:/app/serve
-      - ./app/inputs:/app/inputs
-      - ./app/temp:/app/temp
-      - ./app/outputs:/app/outputs
-      - ./app/Qwen:/app/Qwen
-    working_dir: /app
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, utility, compute]
-    command: [
-      "python3", "serve/qwen2_5_omni_gguf.py",
-      "--model-path", "Qwen/Qwen2.5-Omni-7B-UD-Q8_K_XL.gguf",
-      "--host", "0.0.0.0",
-      "--port", "5000",
-      "--n-ctx", "8192",
-      "--n-gpu-layers", "-1",
-      "--use-mmap",
-      "--segment-duration", "600",
-      "--max-tokens", "8192",
-      "--temperature", "0.1",
-      "--repetition-penalty", "1.1",
-      "--idle-timeout", "600"
-    ]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-    networks:
-      - qwen_network
-    profiles:
-      - gguf
-
-  # Web Demo Service (Optional) - This service also uses the shared image.
-  qwen2.5-omni-web:
-    image: qwen2.5-omni-app:latest
-    container_name: qwen2.5-omni-web
-    ports:
-      - "8920:80"
-    volumes:
-      - ./app/serve:/app/serve
-      - ./app/Qwen:/app/Qwen
-    working_dir: /app
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    command: [
-      "python3", "serve/web_demo.py",
-      "--checkpoint-path", "Qwen/Qwen2.5-Omni-7B",
-      "--server-port", "80",
-      "--server-name", "0.0.0.0",
-      "--flash-attn2"
-    ]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-    networks:
-      - qwen_network
-    profiles:
-      - web
 
 networks:
   qwen_network:

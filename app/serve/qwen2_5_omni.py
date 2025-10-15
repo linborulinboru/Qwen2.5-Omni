@@ -442,7 +442,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-def process_audio_segments(audio_path, request_id, segment_duration=600, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=600, segment_start=0, **kwargs):
     """
     Process long audio by splitting into segments
 
@@ -450,6 +450,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
         audio_path: Path to audio file
         request_id: Unique request identifier
         segment_duration: Duration of each segment in seconds
+        segment_start: Index of segment to start processing from (0-based)
         **kwargs: Additional arguments for transcription
 
     Returns:
@@ -502,13 +503,22 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
 
     segment_duration_mins = segment_duration / 60
     print(f"[{request_id}] Split into {len(segments)} segments ({segment_duration_mins:.1f} mins each)")
+    
+    # Process only from specified segment index
+    if segment_start >= len(segments):
+        print(f"[{request_id}] Error: segment_start ({segment_start}) is greater than number of segments ({len(segments)})")
+        return f"Error: segment_start ({segment_start}) is greater than number of segments ({len(segments)})"
+    
+    print(f"[{request_id}] Starting processing from segment {segment_start}")
 
-    # Process each segment
+    # Process each segment from the specified start index
     results = []
     temp_files = []
 
     try:
-        for idx, segment in enumerate(segments):
+        for idx in range(segment_start, len(segments)):
+            segment = segments[idx]
+            
             # Save segment to temp file
             temp_file = os.path.join(TEMP_DIR, f"{request_id}_segment_{idx}.wav")
             import soundfile as sf
@@ -526,7 +536,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
 
                 # Append segment result to output file immediately
                 with open(output_path, 'a', encoding='utf-8') as f:
-                    if idx > 0:
+                    if idx > segment_start:  # Only add separator if not the first segment we're processing
                         f.write("\n\n")  # Add separator between segments
                     f.write(result)
                 print(f"[{request_id}] Segment {idx+1} appended to: {output_path}")
@@ -536,7 +546,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 results.append(f"[Error in segment {idx}]")
                 # Append error to output file
                 with open(output_path, 'a', encoding='utf-8') as f:
-                    if idx > 0:
+                    if idx > segment_start:  # Only add separator if not the first segment we're processing
                         f.write("\n\n")
                     f.write(f"[Error in segment {idx}]")
 
@@ -552,7 +562,7 @@ def process_audio_segments(audio_path, request_id, segment_duration=600, **kwarg
                 torch.cuda.synchronize()
                 log_gpu_memory(f"{request_id}_cleanup")
 
-        # Simple merging: join all segments
+        # Simple merging: join all processed segments
         merged_result = "\n\n".join(results)
 
         # Log final combined result
@@ -680,8 +690,14 @@ def _transcribe_impl(return_format='file'):
 
             print(f"[{request_id}] Starting transcription...")
 
-            # Get parameters
+            # Get parameters - first check query string then form data for segment_start
             segment_duration = int(request.form.get('segment_duration', 300))
+            # Check both query string and form data for segment_start, with query taking precedence
+            segment_start = request.args.get('segment_start', None)
+            if segment_start is not None:
+                segment_start = int(segment_start)
+            else:
+                segment_start = int(request.form.get('segment_start', 0))  # Default to 0 if not provided
             max_new_tokens = int(request.form.get('max_new_tokens', 8192))
             temperature = float(request.form.get('temperature', 0.1))
             repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
@@ -692,6 +708,7 @@ def _transcribe_impl(return_format='file'):
                 input_path,
                 request_id,
                 segment_duration=segment_duration,
+                segment_start=segment_start,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
@@ -1189,6 +1206,9 @@ if __name__ == "__main__":
     print(f"  GET  /health             - Health check")
     print(f"  POST /transcribe         - Transcribe audio (returns text file)")
     print(f"  POST /transcribe/json    - Transcribe audio (returns JSON)")
+    print(f"[INFO] Query parameters:")
+    print(f"  segment_start - Index of segment to start processing from (0-based, default: 0)")
+    print(f"  Example: /transcribe?segment_start=2 processes from the 3rd segment onwards")
     
     model, processor = _load_model_processor(args)
     

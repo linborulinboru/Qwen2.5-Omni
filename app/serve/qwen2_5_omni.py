@@ -93,7 +93,7 @@ def _load_model_processor(args):
             'checkpoint_path': args.checkpoint_path,
             'flash_attn2': args.flash_attn2,
             'cpu_only': args.cpu_only,
-            'segment_duration': getattr(args, 'segment_duration', 300),
+            'segment_duration': getattr(args, 'segment_duration', 15),
             'max_new_tokens': getattr(args, 'max_new_tokens', 8192),
             'temperature': getattr(args, 'temperature', 0.1),
             'repetition_penalty': getattr(args, 'repetition_penalty', 1.1)
@@ -454,14 +454,14 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-def process_audio_segments(audio_path, request_id, segment_duration=300, segment_start=0, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=15, segment_start=0, **kwargs):
     """
     Process long audio by splitting into segments
 
     Args:
         audio_path: Path to audio file
         request_id: Unique request identifier
-        segment_duration: Duration of each segment in seconds
+        segment_duration: Duration of each segment in seconds (default 15 seconds)
         segment_start: Index of segment to start processing from (0-based)
         **kwargs: Additional arguments for transcription
 
@@ -711,16 +711,16 @@ def _transcribe_impl(return_format='file'):
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters - first check query string then form data for segment_start
-            segment_duration = int(request.form.get('segment_duration', getattr(model_config, 'segment_duration', 300)))
+            segment_duration = int(request.form.get('segment_duration', model_config.get('segment_duration', 15)))
             # Check both query string and form data for segment_start, with query taking precedence
             segment_start = request.args.get('segment_start', None)
             if segment_start is not None:
                 segment_start = int(segment_start)
             else:
                 segment_start = int(request.form.get('segment_start', 0))  # Default to 0 if not provided
-            max_new_tokens = int(request.form.get('max_new_tokens', getattr(model_config, 'max_new_tokens', 8192)))
-            temperature = float(request.form.get('temperature', getattr(model_config, 'temperature', 0.1)))
-            repetition_penalty = float(request.form.get('repetition_penalty', getattr(model_config, 'repetition_penalty', 1.1)))
+            max_new_tokens = int(request.form.get('max_new_tokens', model_config.get('max_new_tokens', 8192)))
+            temperature = float(request.form.get('temperature', model_config.get('temperature', 0.1)))
+            repetition_penalty = float(request.form.get('repetition_penalty', model_config.get('repetition_penalty', 1.1)))
             enable_s2t = request.form.get('enable_s2t', 'true').lower() == 'true'
 
             # Transcribe
@@ -1190,17 +1190,17 @@ def _get_args():
     # Add Flask API arguments
     parser.add_argument('--flask-host', type=str, default='127.0.0.1', help='Flask API host')
     parser.add_argument('--flask-port', type=int, default=5000, help='Flask API port')
-    parser.add_argument('--idle-timeout', type=int, default=300, help='Idle timeout in seconds before unloading model')
-    
+
     # Additional parameters for compatibility with docker-compose
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to (for compatibility)')
     parser.add_argument('--port', type=int, default=7860, help='Port to bind to (for compatibility)')
     parser.add_argument('--audio-only', action='store_true', help='Audio only mode (for compatibility)')
-    parser.add_argument('--segment-duration', type=int, default=300, help='Audio segment duration in seconds (for compatibility)')
+    parser.add_argument('--segment-duration', type=int, default=15, help='Audio segment duration in seconds (for compatibility)')
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')
     parser.add_argument('--memory-optimization', action='store_true', help='Enable additional memory optimization (may reduce performance)')
+    parser.add_argument('--idle-timeout', type=int, default=600, help='Idle timeout in seconds before unloading model')
 
     args = parser.parse_args()
     return args

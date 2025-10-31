@@ -31,7 +31,7 @@ services:
       "--server-name", "0.0.0.0",
       "--server-port", "7860",
       "--flash-attn2",
-      "--segment-duration", "15",
+      "--segment-duration", "60",
       "--max-new-tokens", "8192",
       "--temperature", "0.1",
       "--repetition-penalty", "1.1",

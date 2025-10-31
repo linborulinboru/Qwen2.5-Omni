@@ -454,14 +454,14 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-def process_audio_segments(audio_path, request_id, segment_duration=15, segment_start=0, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=60, segment_start=0, **kwargs):
     """
     Process long audio by splitting into segments
 
     Args:
         audio_path: Path to audio file
         request_id: Unique request identifier
-        segment_duration: Duration of each segment in seconds (default 15 seconds)
+        segment_duration: Duration of each segment in seconds (default 60 seconds)
         segment_start: Index of segment to start processing from (0-based)
         **kwargs: Additional arguments for transcription
 
@@ -711,7 +711,7 @@ def _transcribe_impl(return_format='file'):
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters - first check query string then form data for segment_start
-            segment_duration = int(request.form.get('segment_duration', model_config.get('segment_duration', 15)))
+            segment_duration = int(request.form.get('segment_duration', model_config.get('segment_duration', 60)))
             # Check both query string and form data for segment_start, with query taking precedence
             segment_start = request.args.get('segment_start', None)
             if segment_start is not None:
@@ -1195,7 +1195,7 @@ def _get_args():
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind to (for compatibility)')
     parser.add_argument('--port', type=int, default=7860, help='Port to bind to (for compatibility)')
     parser.add_argument('--audio-only', action='store_true', help='Audio only mode (for compatibility)')
-    parser.add_argument('--segment-duration', type=int, default=15, help='Audio segment duration in seconds (for compatibility)')
+    parser.add_argument('--segment-duration', type=int, default=60, help='Audio segment duration in seconds (for compatibility)')
     parser.add_argument('--max-new-tokens', type=int, default=8192, help='Maximum new tokens to generate (for compatibility)')
     parser.add_argument('--temperature', type=float, default=0.1, help='Sampling temperature (for compatibility)')
     parser.add_argument('--repetition-penalty', type=float, default=1.1, help='Repetition penalty (for compatibility)')

@@ -93,7 +93,7 @@ def _load_model_processor(args):
             'checkpoint_path': args.checkpoint_path,
             'flash_attn2': args.flash_attn2,
             'cpu_only': args.cpu_only,
-            'segment_duration': getattr(args, 'segment_duration', 15),
+            'segment_duration': getattr(args, 'segment_duration', 60),
             'max_new_tokens': getattr(args, 'max_new_tokens', 8192),
             'temperature': getattr(args, 'temperature', 0.1),
             'repetition_penalty': getattr(args, 'repetition_penalty', 1.1)
@@ -332,7 +332,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
         args.checkpoint_path = model_config.get('checkpoint_path', 'Qwen/Qwen2.5-Omni-7B')
         args.flash_attn2 = model_config.get('flash_attn2', False)
         args.cpu_only = model_config.get('cpu_only', False)
-        args.segment_duration = model_config.get('segment_duration', 300)
+        args.segment_duration = model_config.get('segment_duration', 60)
         args.max_new_tokens = model_config.get('max_new_tokens', 8192)
         args.temperature = model_config.get('temperature', 0.1)
         args.repetition_penalty = model_config.get('repetition_penalty', 1.1)
@@ -662,7 +662,7 @@ def _transcribe_impl(return_format='file'):
         args.checkpoint_path = model_config.get('checkpoint_path', 'Qwen/Qwen2.5-Omni-7B')
         args.flash_attn2 = model_config.get('flash_attn2', False)
         args.cpu_only = model_config.get('cpu_only', False)
-        args.segment_duration = model_config.get('segment_duration', 300)
+        args.segment_duration = model_config.get('segment_duration', 60)
         args.max_new_tokens = model_config.get('max_new_tokens', 8192)
         args.temperature = model_config.get('temperature', 0.1)
         args.repetition_penalty = model_config.get('repetition_penalty', 1.1)

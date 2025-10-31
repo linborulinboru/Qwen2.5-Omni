@@ -92,7 +92,11 @@ def _load_model_processor(args):
         model_config = {
             'checkpoint_path': args.checkpoint_path,
             'flash_attn2': args.flash_attn2,
-            'cpu_only': args.cpu_only
+            'cpu_only': args.cpu_only,
+            'segment_duration': getattr(args, 'segment_duration', 300),
+            'max_new_tokens': getattr(args, 'max_new_tokens', 8192),
+            'temperature': getattr(args, 'temperature', 0.1),
+            'repetition_penalty': getattr(args, 'repetition_penalty', 1.1)
         }
 
         if args.cpu_only:
@@ -323,8 +327,16 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
     # Auto-reload model if it was unloaded
     if model is None and model_config:
         print(f"[{request_id}] Model not loaded, reloading...")
-        args = type('Args', (), model_config)()  # Mock args object
+        # Create a mock args object with all necessary attributes
+        args = type('Args', (), {})()
+        args.checkpoint_path = model_config.get('checkpoint_path', 'Qwen/Qwen2.5-Omni-7B')
+        args.flash_attn2 = model_config.get('flash_attn2', False)
         args.cpu_only = model_config.get('cpu_only', False)
+        args.segment_duration = model_config.get('segment_duration', 300)
+        args.max_new_tokens = model_config.get('max_new_tokens', 8192)
+        args.temperature = model_config.get('temperature', 0.1)
+        args.repetition_penalty = model_config.get('repetition_penalty', 1.1)
+        args.audio_only = model_config.get('audio_only', False)
         load_model_processor_with_args(args)
     elif model is None:
         raise RuntimeError("Model not loaded and no configuration available")
@@ -442,7 +454,7 @@ def transcribe_audio_file(audio_path, request_id, max_new_tokens=8192, temperatu
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-def process_audio_segments(audio_path, request_id, segment_duration=600, segment_start=0, **kwargs):
+def process_audio_segments(audio_path, request_id, segment_duration=300, segment_start=0, **kwargs):
     """
     Process long audio by splitting into segments
 
@@ -645,8 +657,16 @@ def _transcribe_impl(return_format='file'):
     # Auto-reload model if needed
     if model is None and model_config:
         print("Model not loaded, reloading...")
-        args = type('Args', (), model_config)()  # Mock args object
+        # Create a mock args object with all necessary attributes
+        args = type('Args', (), {})()
+        args.checkpoint_path = model_config.get('checkpoint_path', 'Qwen/Qwen2.5-Omni-7B')
+        args.flash_attn2 = model_config.get('flash_attn2', False)
         args.cpu_only = model_config.get('cpu_only', False)
+        args.segment_duration = model_config.get('segment_duration', 300)
+        args.max_new_tokens = model_config.get('max_new_tokens', 8192)
+        args.temperature = model_config.get('temperature', 0.1)
+        args.repetition_penalty = model_config.get('repetition_penalty', 1.1)
+        args.audio_only = model_config.get('audio_only', False)
         load_model_processor_with_args(args)
     elif model is None:
         return jsonify({"error": "Model not loaded and no configuration available"}), 503
@@ -691,16 +711,16 @@ def _transcribe_impl(return_format='file'):
             print(f"[{request_id}] Starting transcription...")
 
             # Get parameters - first check query string then form data for segment_start
-            segment_duration = int(request.form.get('segment_duration', 300))
+            segment_duration = int(request.form.get('segment_duration', getattr(model_config, 'segment_duration', 300)))
             # Check both query string and form data for segment_start, with query taking precedence
             segment_start = request.args.get('segment_start', None)
             if segment_start is not None:
                 segment_start = int(segment_start)
             else:
                 segment_start = int(request.form.get('segment_start', 0))  # Default to 0 if not provided
-            max_new_tokens = int(request.form.get('max_new_tokens', 8192))
-            temperature = float(request.form.get('temperature', 0.1))
-            repetition_penalty = float(request.form.get('repetition_penalty', 1.1))
+            max_new_tokens = int(request.form.get('max_new_tokens', getattr(model_config, 'max_new_tokens', 8192)))
+            temperature = float(request.form.get('temperature', getattr(model_config, 'temperature', 0.1)))
+            repetition_penalty = float(request.form.get('repetition_penalty', getattr(model_config, 'repetition_penalty', 1.1)))
             enable_s2t = request.form.get('enable_s2t', 'true').lower() == 'true'
 
             # Transcribe
@@ -1193,7 +1213,12 @@ if __name__ == "__main__":
     model_config = {
         'checkpoint_path': args.checkpoint_path,
         'flash_attn2': args.flash_attn2,
-        'cpu_only': args.cpu_only
+        'cpu_only': args.cpu_only,
+        'segment_duration': args.segment_duration,
+        'max_new_tokens': args.max_new_tokens,
+        'temperature': args.temperature,
+        'repetition_penalty': args.repetition_penalty,
+        'audio_only': args.audio_only
     }
     
     # Start idle monitor thread

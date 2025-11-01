@@ -132,6 +132,7 @@ def _load_model_processor(args):
             print(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
         
         print("Model loaded successfully!")
+        log_gpu_memory("MODEL_LOADED")
         last_activity_time = time.time()
         return model, processor
 
@@ -145,21 +146,41 @@ def unload_model():
     print("Unloading model due to idle timeout...")
 
     try:
+        # Get device info before moving
+        model_device = next(model.parameters()).device if next(model.parameters(), None) is not None else None
+        
         # Move model components to CPU before deletion to free GPU memory
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and model_device is not None and model_device.type == 'cuda':
             print("Moving model components to CPU...")
             try:
                 model.cpu()
             except Exception as e:
                 print(f"Warning: Error moving model to CPU: {e}")
 
-        # Delete model and processor
+        # Detach model from any computation graph
+        if hasattr(model, 'eval'):
+            model.eval()
+
+        # Explicitly delete model parameters and buffers to ensure they're freed
+        for param in model.parameters():
+            param.detach_()
+            param.data = param.data.cpu()  # Ensure data is on CPU
+        for buffer in model.buffers():
+            buffer.detach_()
+            buffer.data = buffer.data.cpu()  # Ensure data is on CPU
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        # Delete model and processor references
         del model
         del processor
+        # Clear local variables to ensure no lingering references
         model = None
         processor = None
 
-        # Clear CUDA cache
+        # Clear CUDA cache again and synchronize
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
@@ -187,7 +208,8 @@ def log_gpu_memory(request_id="system"):
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
-        print(f"[{request_id}] GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+        max_memory = torch.cuda.max_memory_allocated() / 1024**3 if hasattr(torch.cuda, 'max_memory_allocated') else 0
+        print(f"[{request_id}] GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {max_memory:.2f} GB max allocated")
 
 def idle_monitor():
     """Monitor idle time and unload model if idle for too long"""
@@ -207,15 +229,26 @@ def idle_monitor():
         # Check idle time
         idle_time = time.time() - last_activity_time
 
+        # Log current status for debugging (every 5 checks)
+        if int(idle_time) % (idle_check_interval * 5) == 0:
+            status = f"Model loaded: {model is not None}, Idle time: {idle_time:.0f}s/{idle_timeout}s"
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved = torch.cuda.memory_reserved() / 1024**3
+                status += f", GPU: {allocated:.2f}GB/{reserved:.2f}GB"
+            print(f"[IDLE_MONITOR] {status}")
+
         if idle_time >= idle_timeout:
             # Acquire lock and unload model
             with model_lock:
                 # Double check conditions after acquiring lock
                 if model is not None and not is_processing:
-                    print(f"Model idle for {idle_time:.0f} seconds, unloading...")
+                    print(f"Model idle for {idle_time:.0f} seconds (threshold: {idle_timeout}s), unloading...")
+                    log_gpu_memory("PRE_UNLOAD")
                     # Call unload_model (which doesn't acquire lock itself)
                     unload_model()
                     last_activity_time = None
+                    print("Model successfully unloaded due to idle timeout.")
 
 # ==================== Audio Processing Functions ====================
 
@@ -1206,8 +1239,38 @@ def _get_args():
     return args
 
 
+# Global variables
+model = None
+processor = None
+opencc_converter = None  # OpenCC converter for Traditional Chinese
+model_lock = threading.Lock()
+processing_lock = threading.Lock()
+job_status = {}
+job_lock = threading.Lock()
+
+# Idle tracking
+last_activity_time = None
+is_processing = False
+idle_check_interval = 30  # Check every 30 seconds
+idle_timeout = 300  # 5 minutes
+model_config = {}  # Store model configuration for auto-reload
+
+# Directories - use absolute paths to ensure correct location
+WORK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INPUTS_DIR = os.path.join(WORK_DIR, "inputs")
+TEMP_DIR = os.path.join(WORK_DIR, "temp")
+OUTPUTS_DIR = os.path.join(WORK_DIR, "outputs")
+
+os.makedirs(INPUTS_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
+
 if __name__ == "__main__":
     args = _get_args()
+    
+    # Update global idle_timeout with the argument value from the main thread
+    globals()['idle_timeout'] = args.idle_timeout
+    print(f"[INFO] Idle timeout set to {args.idle_timeout} seconds")
     
     # Initialize global config
     model_config = {
